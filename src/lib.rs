@@ -6,5 +6,5 @@
     rust_2018_idioms,
     unreachable_pub
 )]
-pub mod concurrent_skiplist;
 pub mod skiplist;
+pub mod sync_skiplist;
