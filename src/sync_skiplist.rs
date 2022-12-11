@@ -66,35 +66,32 @@ where
     K: Ord,
 {
     pub fn insert(&mut self, key: K, val: V) -> bool {
-        let insertion_point = self.internal_find(&key);
+        // After this check, whether we are holding the head or a regular Node will
+        // not impact the opertation.
+        let insertion_point = unsafe {
+            let insertion_point = self.internal_find(&key);
+
+            if let Ok(insertion_point) = insertion_point {
+                if (*insertion_point).key == key {
+                    let _ = std::mem::replace(&mut (*insertion_point).val, val);
+                    self.state.len += 1;
+                    return true;
+                }
+
+                // We have a regular Node
+                insertion_point
+            } else {
+                // We are dealing with the head of the list
+                insertion_point.unwrap_err()
+            }
+        };
+
+        let new_node = Node::new_rand_height(key, val, self);
+
+        let mut link_node = insertion_point;
 
         unsafe {
-            // check if the insertion_point is of the same key
-
-            if !self.is_head(insertion_point) && (*insertion_point).key == key {
-                // if so, replace the value
-                let _ = std::mem::replace(&mut (*insertion_point).val, val);
-                self.state.len += 1;
-                return true;
-            }
-
-            let new_node = Node::new_rand_height(key, val, self);
-
-            let mut shared_height = 0;
-            for ([new_left, new_right], [_, old_right]) in (*new_node)
-                .pointers
-                .iter_mut()
-                .zip((*insertion_point).pointers.iter_mut())
-            {
-                *new_left = insertion_point;
-                *new_right = *old_right;
-                *old_right = new_node;
-                shared_height += 1;
-            }
-
-            let mut link_node = insertion_point;
-
-            for level in shared_height..((*new_node).pointers.len()) {
+            for level in 0..((*new_node).pointers.len()) {
                 while (*link_node).pointers.len() <= level {
                     link_node = (*link_node).pointers[level - 1][0];
                 }
@@ -106,16 +103,24 @@ where
 
                 *new_left = link_node;
                 *new_right = *old_right;
+                if !old_right.is_null() {
+                    (**old_right).pointers[level][0] = new_node;
+                }
                 *old_right = new_node;
             }
+        }
 
-            self.state.len += 1;
-            true
+        self.state.len += 1;
+        true
+    }
         }
     }
 
-    fn internal_find(&self, key: &K) -> *mut Node<K, V> {
-        let mut level = HEIGHT;
+    /// This method is `unsafe` as it may return the head typecast as a Node, which can
+    /// cause UB if not handled appropriately. If the return value is Ok(...) then it is a
+    /// regular Node. If it is Err(...) then it is the head.
+    unsafe fn internal_find(&self, key: &K) -> Result<*mut Node<K, V>, *mut Node<K, V>> {
+        let mut level = self.state.max_height;
 
         // find the first and highest node tower
         while level > 1 && self.head.pointers[level - 1][1].is_null() {
@@ -143,7 +148,11 @@ where
             }
         }
 
-        curr as *mut _
+        if self.is_head(curr) {
+            return Err(curr as *mut _);
+        }
+
+        Ok(curr as *mut _)
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
@@ -151,11 +160,16 @@ where
             return None;
         }
 
-        let target = self.internal_find(key);
+        // Perform safety check for whether we are dealing with the head.
+        let target = unsafe {
+            let target = self.internal_find(key);
 
-        if self.is_head(target) {
-            return None;
-        }
+            if let Err(_) = target {
+                return None;
+            } else {
+                target.unwrap()
+            }
+        };
 
         unsafe {
             if (*target).key == *key {
@@ -246,7 +260,7 @@ where
 
 struct ListState {
     len: usize,
-    height: usize,
+    max_height: usize,
     seed: usize,
 }
 
