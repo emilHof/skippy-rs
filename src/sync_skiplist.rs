@@ -32,7 +32,7 @@ impl<K, V> SkipList<K, V> {
             head: Head::new(),
             state: ListState {
                 len: 0,
-                height: HEIGHT,
+                max_height: 1,
                 seed: rand::random(),
             },
         }
@@ -40,6 +40,24 @@ impl<K, V> SkipList<K, V> {
 
     pub fn len(&self) -> usize {
         self.state.len
+    }
+    fn gen_height(&mut self) -> usize {
+        let seed = &mut self.state.seed;
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+
+        let mut height = std::cmp::min(HEIGHT, seed.trailing_zeros() as usize + 1);
+
+        while height >= 4 && self.head.pointers[height - 2][1].is_null() {
+            height -= 1;
+        }
+
+        if height > self.state.max_height {
+            self.state.max_height = height;
+        }
+
+        height
     }
 }
 
