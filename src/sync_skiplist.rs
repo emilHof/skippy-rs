@@ -7,6 +7,7 @@ const HEIGHT_BITS: usize = 5;
 
 const HEIGHT: usize = 1 << HEIGHT_BITS;
 
+/// Head stores the first pointer tower at the beginning of the list. It is always of maximum
 #[repr(C)]
 struct Head<K, V> {
     pointers: Vec<[*mut Node<K, V>; 2]>,
@@ -162,9 +163,9 @@ pub struct Node<K, V> {
 impl<K, V> Node<K, V> {
     pub fn new(key: K, val: V, height: usize) -> *mut Self {
         Box::into_raw(Box::new(Node {
+            pointers: vec![[ptr::null_mut(); 2]; height],
             key,
             val,
-            pointers: vec![[ptr::null_mut(); 2]; height],
         }))
     }
 
