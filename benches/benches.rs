@@ -1,15 +1,57 @@
 #![feature(test)]
 use crossbeam_skiplist::SkipMap;
 use skippy::sync_skiplist::SkipList;
+use std::sync::{atomic::AtomicUsize, Arc};
 
 extern crate test;
 
 use test::Bencher;
 
+struct CountOnCmp<K> {
+    key: K,
+    counter: Arc<AtomicUsize>,
+}
+
+impl<K> PartialEq for CountOnCmp<K>
+where
+    K: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.key.eq(&other.key)
+    }
+}
+
+impl<K> Eq for CountOnCmp<K> where K: Eq {}
+
+impl<K> PartialOrd for CountOnCmp<K>
+where
+    K: Ord,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(self.key.cmp(&other.key))
+    }
+}
+
+impl<K> Ord for CountOnCmp<K>
+where
+    K: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.key.cmp(&other.key)
+    }
+}
+
 #[bench]
-fn skippy_insert(b: &mut Bencher) {
+fn insert_skippy(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
+    let counter = Arc::new(AtomicUsize::new(0));
 
     b.iter(|| {
         let mut list = SkipList::new();
@@ -18,15 +60,27 @@ fn skippy_insert(b: &mut Bencher) {
             seed ^= seed << 6;
             seed ^= seed >> 11;
             seed ^= seed << 5;
-            list.insert(seed, "Hello There!");
+            list.insert(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                "Hello There!",
+            );
         }
-    })
+    });
+
+    println!(
+        "cmp count for skippy: {}",
+        counter.load(std::sync::atomic::Ordering::Acquire)
+    );
 }
 
 #[bench]
-fn crossbeam_insert(b: &mut Bencher) {
+fn insert_crossbeam(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
+    let counter = Arc::new(AtomicUsize::new(0));
 
     b.iter(|| {
         let list = SkipMap::new();
@@ -35,7 +89,96 @@ fn crossbeam_insert(b: &mut Bencher) {
             seed ^= seed << 6;
             seed ^= seed >> 11;
             seed ^= seed << 5;
-            list.insert(seed, "Hello There!");
+            list.insert(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                "Hello There!",
+            );
         }
-    })
+    });
+
+    println!(
+        "cmp count for crossbeam: {}",
+        counter.load(std::sync::atomic::Ordering::Acquire)
+    );
+}
+
+#[bench]
+fn get_skippy(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let mut list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..upper {
+        seed ^= seed << 6;
+        seed ^= seed >> 11;
+        seed ^= seed << 5;
+        list.insert(
+            CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            },
+            0,
+        );
+    }
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.get(&CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            });
+        }
+    });
+
+    println!(
+        "cmp count for skippy: {}",
+        counter.load(std::sync::atomic::Ordering::Acquire)
+    );
+}
+
+#[bench]
+fn get_crossbeam(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let list = SkipMap::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..upper {
+        seed ^= seed << 6;
+        seed ^= seed >> 11;
+        seed ^= seed << 5;
+        list.insert(
+            CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            },
+            "Hello There!",
+        );
+    }
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.get(&CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            });
+        }
+    });
+
+    println!(
+        "cmp count for crossbeam: {}",
+        counter.load(std::sync::atomic::Ordering::Acquire)
+    );
 }

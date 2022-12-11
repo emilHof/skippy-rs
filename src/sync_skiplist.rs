@@ -3,27 +3,42 @@ use std::{
     ptr,
 };
 
-use rand::{rngs::ThreadRng, RngCore};
-
 const HEIGHT_BITS: usize = 5;
 
 const HEIGHT: usize = 1 << HEIGHT_BITS;
 
+#[repr(C)]
+struct Head<K, V> {
+    pointers: Vec<[*mut Node<K, V>; 2]>,
+}
+
+impl<K, V> Head<K, V> {
+    fn new() -> Self {
+        Head {
+            pointers: vec![[std::ptr::null_mut(); 2]; HEIGHT],
+        }
+    }
+}
+
 pub struct SkipList<K, V> {
-    head: Node<K, V>,
+    head: Head<K, V>,
     state: ListState,
 }
 
 impl<K, V> SkipList<K, V> {
     pub fn new() -> Self {
         SkipList {
-            head: unsafe { *Box::from_raw(Node::null_full_height()) },
+            head: Head::new(),
             state: ListState {
                 len: 0,
                 height: HEIGHT,
-                seed: rand::thread_rng(),
+                seed: rand::random(),
             },
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.state.len
     }
 }
 
@@ -36,14 +51,12 @@ where
 
         unsafe {
             // check if the insertion_point is of the same key
-            if (*insertion_point)
-                .key
-                .as_ref()
-                .map(|other| *other == key)
-                .unwrap_or(false)
-            {
+
+            if !self.is_head(insertion_point) && (*insertion_point).key == key {
                 // if so, replace the value
-                return (*insertion_point).val.replace(val).is_some();
+                let _ = std::mem::replace(&mut (*insertion_point).val, val);
+                self.state.len += 1;
+                return true;
             }
 
             let new_node = Node::new_rand_height(key, val, self);
@@ -77,6 +90,7 @@ where
                 *old_right = new_node;
             }
 
+            self.state.len += 1;
             true
         }
     }
@@ -89,27 +103,19 @@ where
             level -= 1;
         }
 
-        let mut curr = &self.head as *const Node<K, V>;
+        let mut curr = &self.head as *const Head<K, V> as *const Node<K, V>;
 
         unsafe {
             'search: loop {
                 while level > 1
                     && ((*curr).pointers[level - 1][1].is_null()
-                        || (*(*curr).pointers[level - 1][1])
-                            .key
-                            .as_ref()
-                            .map(|other| other > key)
-                            .unwrap_or(false))
+                        || (*(*curr).pointers[level - 1][1]).key > *key)
                 {
                     level -= 1;
                 }
 
                 if !(*curr).pointers[level - 1][1].is_null()
-                    && (*(*curr).pointers[level - 1][1])
-                        .key
-                        .as_ref()
-                        .map(|other| other <= key)
-                        .unwrap_or(false)
+                    && (*(*curr).pointers[level - 1][1]).key <= *key
                 {
                     curr = (*curr).pointers[level - 1][1];
                 } else {
@@ -120,16 +126,41 @@ where
 
         curr as *mut _
     }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        if self.len() < 1 {
+            return None;
+        }
+
+        let target = self.internal_find(key);
+
+        if self.is_head(target) {
+            return None;
+        }
+
+        unsafe {
+            if (*target).key == *key {
+                return Some(&(*target).val);
+            }
+        }
+
+        None
+    }
+
+    fn is_head(&self, ptr: *const Node<K, V>) -> bool {
+        std::ptr::eq(ptr, &self.head as *const _ as *const Node<K, V>)
+    }
 }
 
+#[repr(C)]
 pub struct Node<K, V> {
-    key: Option<K>,
-    val: Option<V>,
     pointers: Vec<[*mut Node<K, V>; 2]>,
+    key: K,
+    val: V,
 }
 
 impl<K, V> Node<K, V> {
-    pub fn new(key: Option<K>, val: Option<V>, height: usize) -> *mut Self {
+    pub fn new(key: K, val: V, height: usize) -> *mut Self {
         Box::into_raw(Box::new(Node {
             key,
             val,
@@ -137,21 +168,14 @@ impl<K, V> Node<K, V> {
         }))
     }
 
-    /// Constructs a full Node tower with null keys and values
-    fn null_full_height() -> *mut Self {
-        Self::new(None, None, HEIGHT)
-    }
-
     fn new_rand_height<'a>(key: K, val: V, list: &'a mut SkipList<K, V>) -> *mut Self {
         // construct the base nod
-        let height =
-            match (2..HEIGHT).try_fold(1, |prev, height| match list.state.seed.next_u32() % 2 {
-                0 => Err(prev),
-                _ => Ok(height),
-            }) {
-                Ok(res) | Err(res) => res,
-            };
-        Self::new(Some(key), Some(val), height)
+        let seed = &mut list.state.seed;
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+
+        Self::new(key, val, seed.trailing_zeros() as usize + 1)
     }
 }
 
@@ -161,31 +185,11 @@ where
     V: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        match (
-            self.key.as_ref(),
-            self.val.as_ref(),
-            other.key.as_ref(),
-            other.val.as_ref(),
-        ) {
-            (Some(key), Some(val), Some(other_key), Some(other_val)) => {
-                key == other_key && val == other_val
-            }
-            _ => false,
-        }
+        self.key == other.key && self.val == other.val
     }
 
     fn ne(&self, other: &Self) -> bool {
-        match (
-            self.key.as_ref(),
-            self.val.as_ref(),
-            other.key.as_ref(),
-            other.val.as_ref(),
-        ) {
-            (Some(key), Some(val), Some(other_key), Some(other_val)) => {
-                key != other_key || val != other_val
-            }
-            _ => true,
-        }
+        self.key != other.key && self.val != other.val
     }
 }
 
@@ -195,15 +199,13 @@ where
     V: Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unsafe {
-            write!(
-                f,
-                "Node {{ key:  {:?}, val: {:?}, height: {}}}",
-                self.key,
-                self.val,
-                self.pointers.len()
-            )
-        }
+        write!(
+            f,
+            "Node {{ key:  {:?}, val: {:?}, height: {}}}",
+            self.key,
+            self.val,
+            self.pointers.len()
+        )
     }
 }
 
@@ -226,7 +228,7 @@ where
 struct ListState {
     len: usize,
     height: usize,
-    seed: ThreadRng,
+    seed: usize,
 }
 
 struct RefdData<K, V> {
@@ -263,6 +265,11 @@ mod test {
     }
 
     #[test]
+    fn test_new_list() {
+        let _: SkipList<i32, i32> = SkipList::new();
+    }
+
+    #[test]
     fn test_insert() {
         let mut list = SkipList::new();
         let mut rng: u16 = rand::random();
@@ -273,14 +280,14 @@ mod test {
             rng ^= rng << 7;
             list.insert(rng, "hello there!");
         }
-        let mut node = &mut list.head as *mut Node<u16, &str>;
+        let mut node = list.head.pointers[0][0];
         unsafe {
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node).key.unwrap_or(0),
-                    (*node).key.unwrap_or(0)
+                    (*node).key,
+                    (*node).key
                 );
                 print!("                                ");
                 for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
@@ -321,14 +328,14 @@ mod test {
         let mut list = SkipList::new();
 
         list.insert(1, 1);
-        let mut node = &mut list.head as *mut Node<i32, i32>;
+        let mut node = list.head.pointers[0][0];
         unsafe {
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node).key.unwrap_or(0),
-                    (*node).key.unwrap_or(0)
+                    (*node).key,
+                    (*node).key
                 );
                 print!("                                ");
                 for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
@@ -348,15 +355,15 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(2, 2);
-        let mut node = &mut list.head as *mut Node<i32, i32>;
+        let mut node = list.head.pointers[0][0];
 
         unsafe {
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node).key.unwrap_or(0),
-                    (*node).key.unwrap_or(0)
+                    (*node).key,
+                    (*node).key
                 );
                 print!("                                ");
                 for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
@@ -376,15 +383,15 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(5, 3);
-        let mut node = &mut list.head as *mut Node<i32, i32>;
+        let mut node = list.head.pointers[0][0];
 
         unsafe {
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node).key.unwrap_or(0),
-                    (*node).key.unwrap_or(0)
+                    (*node).key,
+                    (*node).key
                 );
                 print!("                                ");
                 for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
