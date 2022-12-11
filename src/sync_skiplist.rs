@@ -41,6 +41,7 @@ impl<K, V> SkipList<K, V> {
     pub fn len(&self) -> usize {
         self.state.len
     }
+
     fn gen_height(&mut self) -> usize {
         let seed = &mut self.state.seed;
         *seed ^= *seed << 13;
@@ -113,6 +114,54 @@ where
         self.state.len += 1;
         true
     }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        if self.len() < 1 {
+            return None;
+        }
+
+        let target = unsafe {
+            match self.internal_find(key) {
+                Err(_) => return None,
+                Ok(target) => {
+                    if (*target).key != *key {
+                        return None;
+                    } else if target.is_null() {
+                        return None;
+                    }
+
+                    target
+                }
+            }
+        };
+
+        self.unlink(target);
+
+        let Node {
+            key: _,
+            val,
+            pointers: _,
+        } = unsafe { *Box::from_raw(target) };
+
+        self.state.len -= 1;
+
+        Some(val)
+    }
+
+    /// Logically removes the node from the list by linking its adjacent nodes to one-another.
+    fn unlink(&self, node: *mut Node<K, V>) {
+        // safety check against UB caused by unlinking the head
+        if self.is_head(node) {
+            panic!()
+        }
+
+        unsafe {
+            for (level, [left, right]) in (*node).pointers.iter().enumerate().rev() {
+                (**left).pointers[level][1] = *right;
+                if !right.is_null() {
+                    (**right).pointers[level][0] = *left;
+                }
+            }
         }
     }
 
@@ -208,7 +257,7 @@ impl<K, V> Node<K, V> {
         *seed ^= *seed >> 17;
         *seed ^= *seed << 5;
 
-        Self::new(key, val, seed.trailing_zeros() as usize + 1)
+        Self::new(key, val, list.gen_height())
     }
 }
 
@@ -313,37 +362,15 @@ mod test {
             rng ^= rng << 7;
             list.insert(rng, "hello there!");
         }
-        let mut node = list.head.pointers[0][0];
-        unsafe {
-            while !node.is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
-                    (*node).key,
-                    (*node).key
-                );
-                print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
-                    print!("{:?} | ", left);
-                }
-                print!("\n");
-                print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
-                    print!("{:?} | ", right);
-                }
-                print!("\n");
-                node = (*node).pointers[0][1];
-            }
-        }
     }
 
     #[test]
     fn test_rand_height() {
         let mut list = SkipList::new();
-        let mut node = Node::new_rand_height("Hello", "There!", &mut list);
+        let node = Node::new_rand_height("Hello", "There!", &mut list);
 
         assert!(!node.is_null());
-        let mut height = unsafe { (*node).pointers.len() };
+        let height = unsafe { (*node).pointers.len() };
 
         println!("height: {}", height);
 
@@ -361,7 +388,7 @@ mod test {
         let mut list = SkipList::new();
 
         list.insert(1, 1);
-        let mut node = list.head.pointers[0][0];
+        let mut node = list.head.pointers[0][1];
         unsafe {
             while !node.is_null() {
                 println!(
@@ -388,7 +415,7 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(2, 2);
-        let mut node = list.head.pointers[0][0];
+        let mut node = list.head.pointers[0][1];
 
         unsafe {
             while !node.is_null() {
@@ -416,7 +443,89 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(5, 3);
-        let mut node = list.head.pointers[0][0];
+        let mut node = list.head.pointers[0][1];
+
+        unsafe {
+            while !node.is_null() {
+                println!(
+                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
+                    node,
+                    (*node).key,
+                    (*node).key
+                );
+                print!("                                ");
+                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                    print!("{:?} | ", left);
+                }
+                print!("\n");
+                print!("                                ");
+                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                    print!("{:?} | ", right);
+                }
+                print!("\n");
+                node = (*node).pointers[0][1];
+            }
+        }
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut list = SkipList::new();
+        let mut rng: u16 = rand::random();
+
+        for _ in 0..100_000 {
+            rng ^= rng << 3;
+            rng ^= rng >> 12;
+            rng ^= rng << 7;
+            list.insert(rng, "hello there!");
+        }
+        for _ in 0..100_000 {
+            rng ^= rng << 3;
+            rng ^= rng >> 12;
+            rng ^= rng << 7;
+            list.remove(&rng);
+        }
+    }
+
+    // #[test]
+    fn test_verbose_remove() {
+        let mut list = SkipList::new();
+
+        list.insert(1, 1);
+        list.insert(2, 2);
+        list.insert(5, 3);
+        let mut node = list.head.pointers[0][1];
+
+        unsafe {
+            while !node.is_null() {
+                println!(
+                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
+                    node,
+                    (*node).key,
+                    (*node).key
+                );
+                print!("                                ");
+                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                    print!("{:?} | ", left);
+                }
+                print!("\n");
+                print!("                                ");
+                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                    print!("{:?} | ", right);
+                }
+                print!("\n");
+                node = (*node).pointers[0][1];
+            }
+        }
+
+        assert!(list.remove(&1).is_some());
+        assert!(list.remove(&6).is_none());
+        assert!(list.remove(&1).is_none());
+        assert!(list.remove(&5).is_some());
+        assert!(list.remove(&2).is_some());
+
+        println!("/////////////////////////////////////////////////////////////////////////");
+        println!("/////////////////////////////////////////////////////////////////////////");
 
         unsafe {
             while !node.is_null() {
