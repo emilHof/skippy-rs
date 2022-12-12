@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     fmt::{Debug, Display},
     ptr,
 };
@@ -27,6 +28,7 @@ pub struct SkipList<K, V> {
 }
 
 impl<K, V> SkipList<K, V> {
+    /// Instantiates a new, empty [SkipList](SkipList).
     pub fn new() -> Self {
         SkipList {
             head: Head::new(),
@@ -38,10 +40,15 @@ impl<K, V> SkipList<K, V> {
         }
     }
 
+    /// Gets the length of the [SkipList](SkipList).
     pub fn len(&self) -> usize {
         self.state.len
     }
 
+    /// Randomly generates a height that is within the right parameters.
+    /// Prevents the hight from getting unnecessarily large by making it
+    /// at most one level higher then the previously largest height in the
+    /// list.
     fn gen_height(&mut self) -> usize {
         let seed = &mut self.state.seed;
         *seed ^= *seed << 13;
@@ -66,16 +73,17 @@ impl<K, V> SkipList<K, V>
 where
     K: Ord,
 {
-    pub fn insert(&mut self, key: K, val: V) -> bool {
+    /// Inserts a value in the list given a key if the key is not yet present, otherwise replace
+    /// the value associated with the new value.
+    pub fn insert_or_replace(&mut self, key: K, val: V) -> bool {
         // After this check, whether we are holding the head or a regular Node will
-        // not impact the opertation.
+        // not impact the operation.
         let insertion_point = unsafe {
             let insertion_point = self.internal_find(&key);
 
             if let Ok(insertion_point) = insertion_point {
                 if (*insertion_point).key == key {
                     let _ = std::mem::replace(&mut (*insertion_point).val, val);
-                    self.state.len += 1;
                     return true;
                 }
 
@@ -89,33 +97,65 @@ where
 
         let new_node = Node::new_rand_height(key, val, self);
 
-        let mut link_node = insertion_point;
+        let link_node = insertion_point;
 
-        unsafe {
-            for level in 0..((*new_node).pointers.len()) {
-                while (*link_node).pointers.len() <= level {
-                    link_node = (*link_node).pointers[level - 1][0];
-                }
-
-                let ([new_left, new_right], [_, old_right]) = (
-                    &mut (*new_node).pointers[level],
-                    &mut (*link_node).pointers[level],
-                );
-
-                *new_left = link_node;
-                *new_right = *old_right;
-                if !old_right.is_null() {
-                    (**old_right).pointers[level][0] = new_node;
-                }
-                *old_right = new_node;
-            }
-        }
+        unsafe { Self::link_nodes(new_node, link_node) };
 
         self.state.len += 1;
         true
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    /// Inserts a value in the list given a key.
+    pub fn insert(&mut self, key: K, val: V) {
+        // After this check, whether we are holding the head or a regular Node will
+        // not impact the operation.
+        let insertion_point = unsafe {
+            match self.internal_find(&key) {
+                Ok(insertion_point) => insertion_point,
+                Err(insertion_point) => insertion_point,
+            }
+        };
+
+        let new_node = Node::new_rand_height(key, val, self);
+
+        let link_node = insertion_point;
+
+        unsafe { Self::link_nodes(new_node, link_node) };
+
+        self.state.len += 1;
+    }
+
+    /// This function is unsafe, as it does not check whether new_node or link node are valid
+    /// pointers.
+    /// To call this function safely:
+    /// - new_node cannot be null
+    /// - link_node cannot be null
+    /// - no pointer tower along the path can have a null pointer pointing backwards
+    /// - a tower of sufficient height must eventually be reached, the list head can be this tower
+    unsafe fn link_nodes(new_node: *mut Node<K, V>, mut link_node: *mut Node<K, V>) {
+        // iterate over all the levels in the new nodes pointer tower
+        for level in 0..((*new_node).pointers.len()) {
+            // move backwards until a pointer tower of sufficient hight is reached
+            while (*link_node).pointers.len() <= level {
+                link_node = (*link_node).pointers[level - 1][0];
+            }
+
+            let ([new_left, new_right], [_, old_right]) = (
+                &mut (*new_node).pointers[level],
+                &mut (*link_node).pointers[level],
+            );
+
+            // perform the re-linking
+            *new_left = link_node;
+            *new_right = *old_right;
+            if !old_right.is_null() {
+                (**old_right).pointers[level][0] = new_node;
+            }
+            *old_right = new_node;
+        }
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
         if self.len() < 1 {
             return None;
         }
@@ -138,14 +178,14 @@ where
         self.unlink(target);
 
         let Node {
-            key: _,
+            key,
             val,
             pointers: _,
         } = unsafe { *Box::from_raw(target) };
 
         self.state.len -= 1;
 
-        Some(val)
+        Some((key, val))
     }
 
     /// Logically removes the node from the list by linking its adjacent nodes to one-another.
@@ -204,7 +244,7 @@ where
         Ok(curr as *mut _)
     }
 
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get<'a>(&self, key: &K) -> Option<Entry<'a, K, V>> {
         if self.len() < 1 {
             return None;
         }
@@ -222,7 +262,11 @@ where
 
         unsafe {
             if (*target).key == *key {
-                return Some(&(*target).val);
+                let target = &(*target);
+                return Some(Entry {
+                    key: &target.key,
+                    val: &target.val,
+                });
             }
         }
 
@@ -231,6 +275,51 @@ where
 
     fn is_head(&self, ptr: *const Node<K, V>) -> bool {
         std::ptr::eq(ptr, &self.head as *const _ as *const Node<K, V>)
+    }
+
+    pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
+        if self.len() < 1 {
+            return None;
+        }
+
+        let first = self.head.pointers[0][1];
+
+        unsafe {
+            if !first.is_null() {
+                let first = &(*first);
+                return Some(Entry {
+                    key: &first.key,
+                    val: &first.val,
+                });
+            }
+        }
+
+        None
+    }
+
+    pub fn get_last<'a>(&self) -> Option<Entry<'a, K, V>> {
+        if self.len() < 1 {
+            return None;
+        }
+
+        let curr = self.head.pointers[0][1];
+
+        unsafe {
+            if curr.is_null() {
+                return None;
+            }
+
+            let mut curr = &(*curr);
+
+            while !curr.pointers[0][1].is_null() {
+                curr = &(*curr.pointers[0][1]);
+            }
+
+            Some(Entry {
+                key: &curr.key,
+                val: &curr.val,
+            })
+        }
     }
 }
 
@@ -247,15 +336,70 @@ impl<K, V> Drop for SkipList<K, V> {
     }
 }
 
+impl<K, V> super::skiplist::SkipList<K, V> for SkipList<K, V>
+where
+    K: Ord,
+{
+    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a;
+
+    fn new() -> Self {
+        SkipList::new()
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.insert(key, value)
+    }
+
+    fn insert_or_replace(&mut self, key: K, value: V) -> bool {
+        self.insert_or_replace(key, value)
+    }
+    fn remove(&mut self, key: &K) -> Option<(K, V)> {
+        self.remove(key)
+    }
+
+    fn get<'a>(&self, key: &K) -> Option<Self::Entry<'a>> {
+        self.get(key)
+    }
+
+    fn last<'a>(&self) -> Option<Self::Entry<'a>> {
+        self.get_first()
+    }
+
+    fn front<'a>(&self) -> Option<Self::Entry<'a>> {
+        self.get_last()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+pub struct Entry<'a, K, V> {
+    key: &'a K,
+    val: &'a V,
+}
+
+impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
+    fn borrow(&self) -> &K {
+        self.key
+    }
+}
+
+impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
+    fn as_ref(&self) -> &V {
+        &self.val
+    }
+}
+
 #[repr(C)]
-pub struct Node<K, V> {
+struct Node<K, V> {
     pointers: Vec<[*mut Node<K, V>; 2]>,
     key: K,
     val: V,
 }
 
 impl<K, V> Node<K, V> {
-    pub fn new(key: K, val: V, height: usize) -> *mut Self {
+    fn new(key: K, val: V, height: usize) -> *mut Self {
         Box::into_raw(Box::new(Node {
             pointers: vec![[ptr::null_mut(); 2]; height],
             key,
