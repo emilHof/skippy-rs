@@ -71,7 +71,7 @@ fn insert_skippy(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for skippy: {}m",
+        "cmp count for insert skippy: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
@@ -100,7 +100,7 @@ fn insert_crossbeam(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for crossbeam: {}m",
+        "cmp count for insert crossbeam: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
@@ -139,7 +139,7 @@ fn get_skippy(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for skippy: {}m",
+        "cmp count for get skippy: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
@@ -178,7 +178,7 @@ fn get_crossbeam(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for skippy: {}m",
+        "cmp count for get crossbeam: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
@@ -217,7 +217,7 @@ fn remove_skippy(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for skippy: {}m",
+        "cmp count for remove skippy: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
@@ -256,7 +256,7 @@ fn remove_crossbeam(b: &mut Bencher) {
     });
 
     println!(
-        "cmp count for skippy: {}m",
+        "cmp count for remove crossbeam: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
