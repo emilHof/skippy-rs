@@ -1,7 +1,9 @@
 use std::{
+    alloc::{alloc, dealloc, handle_alloc_error, Layout},
     borrow::Borrow,
     fmt::{Debug, Display},
-    ptr,
+    ops::{Deref, DerefMut, Index, IndexMut},
+    ptr::NonNull,
 };
 
 const HEIGHT_BITS: usize = 5;
@@ -11,19 +13,151 @@ const HEIGHT: usize = 1 << HEIGHT_BITS;
 /// Head stores the first pointer tower at the beginning of the list. It is always of maximum
 #[repr(C)]
 struct Head<K, V> {
-    pointers: Vec<[*mut Node<K, V>; 2]>,
+    key: K,
+    val: V,
+    height: usize,
+    levels: Levels<K, V>,
 }
 
 impl<K, V> Head<K, V> {
-    fn new() -> Self {
-        Head {
-            pointers: vec![[std::ptr::null_mut(); 2]; HEIGHT],
+    fn new() -> NonNull<Self> {
+        let head_ptr = unsafe { Node::<K, V>::alloc(HEIGHT).cast() };
+
+        if let Some(head) = NonNull::new(head_ptr) {
+            head
+        } else {
+            panic!()
         }
+    }
+
+    unsafe fn drop(ptr: NonNull<Self>) {
+        Node::<K, V>::dealloc(ptr.as_ptr().cast());
+    }
+}
+
+#[repr(C)]
+struct Levels<K, V> {
+    pointers: [[*mut Node<K, V>; 2]; 1],
+}
+
+impl<K, V> Levels<K, V> {
+    fn get_size(height: usize) -> usize {
+        assert!(height <= HEIGHT && height > 0);
+
+        core::mem::size_of::<[*mut Node<K, V>; 2]>() * height
+    }
+}
+
+impl<K, V> Index<usize> for Levels<K, V> {
+    type Output = [*mut Node<K, V>; 2];
+
+    fn index(&self, index: usize) -> &Self::Output {
+        unsafe { self.pointers.get_unchecked(index) }
+    }
+}
+
+impl<K, V> IndexMut<usize> for Levels<K, V> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        unsafe { self.pointers.get_unchecked_mut(index) }
+    }
+}
+
+#[repr(C)]
+struct Node<K, V> {
+    key: K,
+    val: V,
+    height: usize,
+    levels: Levels<K, V>,
+}
+
+impl<K, V> Node<K, V> {
+    fn new(key: K, val: V, height: usize) -> *mut Self {
+        let node = unsafe {
+            let node = Self::alloc(height);
+
+            core::ptr::write(&mut (*node).key, key);
+            core::ptr::write(&mut (*node).val, val);
+            node
+        };
+
+        node
+    }
+
+    fn new_rand_height<'a>(key: K, val: V, list: &'a mut SkipList<K, V>) -> *mut Self {
+        // construct the base nod
+        let seed = &mut list.state.seed;
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+
+        Self::new(key, val, list.gen_height())
+    }
+
+    unsafe fn alloc(height: usize) -> *mut Self {
+        let layout = Self::get_layout(height);
+
+        let ptr = alloc(layout).cast::<Self>();
+
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
+
+        core::ptr::write(&mut (*ptr).height, height);
+
+        for level in 0..height {
+            core::ptr::write(&mut (*ptr).levels[level], [core::ptr::null_mut(); 2]);
+        }
+
+        ptr
+    }
+
+    unsafe fn dealloc(ptr: *mut Self) {
+        let height = (*ptr).height;
+
+        let layout = Self::get_layout(height);
+
+        dealloc(ptr.cast(), layout);
+    }
+
+    unsafe fn get_layout(height: usize) -> Layout {
+        let size_self = core::mem::size_of::<Self>();
+        let align = core::mem::align_of::<Self>();
+        let size_levels = Levels::<K, V>::get_size(height);
+
+        /*
+        println!(
+            "size_self: {}, size_levels: {}, align: {}",
+            size_self, size_levels, align
+        );
+        */
+
+        Layout::from_size_align_unchecked(size_self + size_levels, align)
+    }
+
+    unsafe fn drop(ptr: *mut Self) {
+        core::ptr::drop_in_place(&mut (*ptr).key);
+        core::ptr::drop_in_place(&mut (*ptr).val);
+
+        Self::dealloc(ptr);
+    }
+}
+
+impl<K, V> Deref for Node<K, V> {
+    type Target = Levels<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.levels
+    }
+}
+
+impl<K, V> DerefMut for Node<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.levels
     }
 }
 
 pub struct SkipList<K, V> {
-    head: Head<K, V>,
+    head: NonNull<Head<K, V>>,
     state: ListState,
 }
 
@@ -57,7 +191,9 @@ impl<K, V> SkipList<K, V> {
 
         let mut height = std::cmp::min(HEIGHT, seed.trailing_zeros() as usize + 1);
 
-        while height >= 4 && self.head.pointers[height - 2][1].is_null() {
+        let head = unsafe { &(*self.head.as_ptr()) };
+
+        while height >= 4 && head.levels[height - 2][1].is_null() {
             height -= 1;
         }
 
@@ -134,24 +270,19 @@ where
     /// - a tower of sufficient height must eventually be reached, the list head can be this tower
     unsafe fn link_nodes(new_node: *mut Node<K, V>, mut link_node: *mut Node<K, V>) {
         // iterate over all the levels in the new nodes pointer tower
-        for level in 0..((*new_node).pointers.len()) {
+        for level in 0..((*new_node).height) {
             // move backwards until a pointer tower of sufficient hight is reached
-            while (*link_node).pointers.len() <= level {
-                link_node = (*link_node).pointers[level - 1][0];
+            while (*link_node).height <= level {
+                link_node = (*link_node).levels[level - 1][0];
             }
-
-            let ([new_left, new_right], [_, old_right]) = (
-                &mut (*new_node).pointers[level],
-                &mut (*link_node).pointers[level],
-            );
 
             // perform the re-linking
-            *new_left = link_node;
-            *new_right = *old_right;
-            if !old_right.is_null() {
-                (**old_right).pointers[level][0] = new_node;
+            (*new_node).levels[level][0] = link_node;
+            (*new_node).levels[level][1] = (*link_node).levels[level][1];
+            if !(*link_node).levels[level][1].is_null() {
+                (*(*link_node).levels[level][1]).levels[level][0] = new_node;
             }
-            *old_right = new_node;
+            (*link_node).levels[level][1] = new_node;
         }
     }
 
@@ -164,12 +295,11 @@ where
             match self.internal_find(key) {
                 Err(_) => return None,
                 Ok(target) => {
-                    if (*target).key != *key {
+                    if target.is_null() {
                         return None;
-                    } else if target.is_null() {
+                    } else if (*target).key != *key {
                         return None;
                     }
-
                     target
                 }
             }
@@ -177,11 +307,13 @@ where
 
         self.unlink(target);
 
-        let Node {
-            key,
-            val,
-            pointers: _,
-        } = unsafe { *Box::from_raw(target) };
+        let (key, val) = unsafe {
+            let key = core::ptr::read(&(*target).key);
+            let val = core::ptr::read(&(*target).val);
+            Node::<K, V>::dealloc(target);
+
+            (key, val)
+        };
 
         self.state.len -= 1;
 
@@ -196,10 +328,11 @@ where
         }
 
         unsafe {
-            for (level, [left, right]) in (*node).pointers.iter().enumerate().rev() {
-                (**left).pointers[level][1] = *right;
+            for level in (0..(*node).height).rev() {
+                let [left, right] = (*node).levels[level];
+                (*left).levels[level][1] = right;
                 if !right.is_null() {
-                    (**right).pointers[level][0] = *left;
+                    (*right).levels[level][0] = left;
                 }
             }
         }
@@ -210,27 +343,28 @@ where
     /// regular Node. If it is Err(...) then it is the head.
     unsafe fn internal_find(&self, key: &K) -> Result<*mut Node<K, V>, *mut Node<K, V>> {
         let mut level = self.state.max_height;
+        let head = unsafe { &(*self.head.as_ptr()) };
 
         // find the first and highest node tower
-        while level > 1 && self.head.pointers[level - 1][1].is_null() {
+        while level > 1 && head.levels[level - 1][1].is_null() {
             level -= 1;
         }
 
-        let mut curr = &self.head as *const Head<K, V> as *const Node<K, V>;
+        let mut curr = self.head.as_ptr() as *const Node<K, V>;
 
         unsafe {
             'search: loop {
                 while level > 1
-                    && ((*curr).pointers[level - 1][1].is_null()
-                        || (*(*curr).pointers[level - 1][1]).key > *key)
+                    && ((*curr).levels[level - 1][1].is_null()
+                        || (*(*curr).levels[level - 1][1]).key > *key)
                 {
                     level -= 1;
                 }
 
-                if !(*curr).pointers[level - 1][1].is_null()
-                    && (*(*curr).pointers[level - 1][1]).key <= *key
+                if !(*curr).levels[level - 1][1].is_null()
+                    && (*(*curr).levels[level - 1][1]).key <= *key
                 {
-                    curr = (*curr).pointers[level - 1][1];
+                    curr = (*curr).levels[level - 1][1];
                 } else {
                     break 'search;
                 }
@@ -274,7 +408,7 @@ where
     }
 
     fn is_head(&self, ptr: *const Node<K, V>) -> bool {
-        std::ptr::eq(ptr, &self.head as *const _ as *const Node<K, V>)
+        std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
     pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
@@ -282,7 +416,7 @@ where
             return None;
         }
 
-        let first = self.head.pointers[0][1];
+        let first = unsafe { (*self.head.as_ptr()).levels[0][1] };
 
         unsafe {
             if !first.is_null() {
@@ -302,7 +436,7 @@ where
             return None;
         }
 
-        let curr = self.head.pointers[0][1];
+        let curr = unsafe { (*self.head.as_ptr()).levels[0][1] };
 
         unsafe {
             if curr.is_null() {
@@ -311,8 +445,8 @@ where
 
             let mut curr = &(*curr);
 
-            while !curr.pointers[0][1].is_null() {
-                curr = &(*curr.pointers[0][1]);
+            while !curr.levels[0][1].is_null() {
+                curr = &(*curr.levels[0][1]);
             }
 
             Some(Entry {
@@ -325,14 +459,17 @@ where
 
 impl<K, V> Drop for SkipList<K, V> {
     fn drop(&mut self) {
-        let mut node = self.head.pointers[0][1];
+        let mut node = unsafe { (*self.head.as_ptr()).levels[0][1] };
 
         while !node.is_null() {
             unsafe {
-                let owned = *Box::from_raw(node);
-                node = owned.pointers[0][1];
+                let temp = node;
+                node = (*temp).levels[0][1];
+                Node::<K, V>::drop(temp);
             }
         }
+
+        unsafe { Head::<K, V>::drop(self.head) };
     }
 }
 
@@ -391,33 +528,6 @@ impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
     }
 }
 
-#[repr(C)]
-struct Node<K, V> {
-    pointers: Vec<[*mut Node<K, V>; 2]>,
-    key: K,
-    val: V,
-}
-
-impl<K, V> Node<K, V> {
-    fn new(key: K, val: V, height: usize) -> *mut Self {
-        Box::into_raw(Box::new(Node {
-            pointers: vec![[ptr::null_mut(); 2]; height],
-            key,
-            val,
-        }))
-    }
-
-    fn new_rand_height<'a>(key: K, val: V, list: &'a mut SkipList<K, V>) -> *mut Self {
-        // construct the base nod
-        let seed = &mut list.state.seed;
-        *seed ^= *seed << 13;
-        *seed ^= *seed >> 17;
-        *seed ^= *seed << 5;
-
-        Self::new(key, val, list.gen_height())
-    }
-}
-
 impl<K, V> PartialEq for Node<K, V>
 where
     K: PartialEq,
@@ -440,10 +550,13 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Node {{ key:  {:?}, val: {:?}, height: {}}}",
+            "Node {{ key:  {:?}, val: {:?}, height: {}, levels: [{}]}}",
             self.key,
             self.val,
-            self.pointers.len()
+            self.height,
+            (0..self.height).fold(String::new(), |acc, level| {
+                format!("{}{:?}, ", acc, self.pointers[level])
+            })
         )
     }
 }
@@ -492,20 +605,25 @@ mod test {
 
     #[test]
     fn test_new_node() {
-        let node = unsafe { Box::from_raw(Node::new(Some(100), Some("hello"), 1)) };
-        assert_eq!(
-            Node {
-                key: Some(100),
-                val: Some("hello"),
-                pointers: vec![[ptr::null_mut(); 2]; 1]
-            },
-            *node
-        );
+        let node = unsafe { Node::new(100, "hello", 1) };
+        let other = unsafe { Node::new(100, "hello", 1) };
+        unsafe { println!("node 1: {:?},", *node) };
+        unsafe { println!("node 2: {:?},", *other) };
+        let other = unsafe {
+            let node = Node::alloc(1);
+            core::ptr::write(&mut (*node).key, 100);
+            core::ptr::write(&mut (*node).val, "hello");
+            node
+        };
+
+        unsafe { println!("node 1: {:?}, node 2: {:?}", *node, *other) };
+
+        unsafe { assert_eq!(*node, *other) };
     }
 
     #[test]
     fn test_new_list() {
-        let _: SkipList<i32, i32> = SkipList::new();
+        let _: SkipList<usize, usize> = SkipList::new();
     }
 
     #[test]
@@ -540,13 +658,13 @@ mod test {
         }
     }
 
-    // #[test]
+    #[test]
     fn test_insert_verbose() {
         let mut list = SkipList::new();
 
         list.insert(1, 1);
-        let mut node = list.head.pointers[0][1];
         unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0][1];
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
@@ -555,16 +673,18 @@ mod test {
                     (*node).key
                 );
                 print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [left, _] = (*node).levels[level];
                     print!("{:?} | ", left);
                 }
                 print!("\n");
                 print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [_, right] = (*node).levels[level];
                     print!("{:?} | ", right);
                 }
                 print!("\n");
-                node = (*node).pointers[0][1];
+                node = (*node).levels[0][1];
             }
         }
 
@@ -572,9 +692,9 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(2, 2);
-        let mut node = list.head.pointers[0][1];
 
         unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0][1];
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
@@ -583,16 +703,18 @@ mod test {
                     (*node).key
                 );
                 print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [left, _] = (*node).levels[level];
                     print!("{:?} | ", left);
                 }
                 print!("\n");
                 print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [_, right] = (*node).levels[level];
                     print!("{:?} | ", right);
                 }
                 print!("\n");
-                node = (*node).pointers[0][1];
+                node = (*node).levels[0][1];
             }
         }
 
@@ -600,9 +722,9 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         list.insert(5, 3);
-        let mut node = list.head.pointers[0][1];
 
         unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0][1];
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
@@ -611,18 +733,22 @@ mod test {
                     (*node).key
                 );
                 print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [left, _] = (*node).levels[level];
                     print!("{:?} | ", left);
                 }
                 print!("\n");
                 print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [_, right] = (*node).levels[level];
                     print!("{:?} | ", right);
                 }
                 print!("\n");
                 node = (*node).pointers[0][1];
             }
         }
+
+        println!("trying to drop");
     }
 
     #[test]
@@ -651,9 +777,9 @@ mod test {
         list.insert(1, 1);
         list.insert(2, 2);
         list.insert(5, 3);
-        let mut node = list.head.pointers[0][1];
 
         unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0][1];
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
@@ -662,12 +788,14 @@ mod test {
                     (*node).key
                 );
                 print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [left, _] = (*node).levels[level];
                     print!("{:?} | ", left);
                 }
                 print!("\n");
                 print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [_, right] = (*node).levels[level];
                     print!("{:?} | ", right);
                 }
                 print!("\n");
@@ -685,6 +813,7 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0][1];
             while !node.is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
@@ -693,16 +822,18 @@ mod test {
                     (*node).key
                 );
                 print!("                                ");
-                for (_, [left, _]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [left, _] = (*node).levels[level];
                     print!("{:?} | ", left);
                 }
                 print!("\n");
                 print!("                                ");
-                for (_, [_, right]) in (0..6).zip((*node).pointers.iter()) {
+                for level in 0..(*node).height {
+                    let [_, right] = (*node).levels[level];
                     print!("{:?} | ", right);
                 }
                 print!("\n");
-                node = (*node).pointers[0][1];
+                node = (*node).levels[0][1];
             }
         }
     }
