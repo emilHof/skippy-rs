@@ -234,6 +234,19 @@ where
     }
 }
 
+impl<K, V> Drop for SkipList<K, V> {
+    fn drop(&mut self) {
+        let mut node = self.head.pointers[0][1];
+
+        while !node.is_null() {
+            unsafe {
+                let owned = *Box::from_raw(node);
+                node = owned.pointers[0][1];
+            }
+        }
+    }
+}
+
 #[repr(C)]
 pub struct Node<K, V> {
     pointers: Vec<[*mut Node<K, V>; 2]>,
