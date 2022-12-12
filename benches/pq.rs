@@ -1,6 +1,6 @@
 #![feature(test)]
 use crossbeam_skiplist::SkipSet;
-use skippy::priority_queue::PriorityQueue;
+use skippy::collections::priority_queue::PriorityQueue;
 use std::collections::BinaryHeap;
 
 extern crate test;

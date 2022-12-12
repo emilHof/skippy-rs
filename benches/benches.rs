@@ -191,20 +191,20 @@ fn remove_skippy(b: &mut Bencher) {
 
     let counter = Arc::new(AtomicUsize::new(0));
 
-    for _ in 0..upper {
-        seed ^= seed << 6;
-        seed ^= seed >> 11;
-        seed ^= seed << 5;
-        list.insert(
-            CountOnCmp {
-                key: seed,
-                counter: counter.clone(),
-            },
-            0,
-        );
-    }
-
     b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.insert_or_replace(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                0,
+            );
+        }
+
         for _ in 0..upper {
             seed ^= seed << 6;
             seed ^= seed >> 11;
@@ -230,20 +230,20 @@ fn remove_crossbeam(b: &mut Bencher) {
 
     let counter = Arc::new(AtomicUsize::new(0));
 
-    for _ in 0..upper {
-        seed ^= seed << 6;
-        seed ^= seed >> 11;
-        seed ^= seed << 5;
-        list.insert(
-            CountOnCmp {
-                key: seed,
-                counter: counter.clone(),
-            },
-            "Hello There!",
-        );
-    }
-
     b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.insert(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                "Hello There!",
+            );
+        }
+
         for _ in 0..upper {
             seed ^= seed << 6;
             seed ^= seed >> 11;
