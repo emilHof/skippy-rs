@@ -6,6 +6,7 @@
     rust_2018_idioms,
     unreachable_pub
 )]
-pub mod priority_queue;
+pub mod collections;
+pub mod shared_skiplist;
 pub mod skiplist;
 pub mod sync_skiplist;
