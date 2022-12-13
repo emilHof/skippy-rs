@@ -7,6 +7,5 @@
     unreachable_pub
 )]
 pub mod collections;
-pub mod shared_skiplist;
 pub mod skiplist;
 pub mod sync_skiplist;

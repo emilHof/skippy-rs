@@ -770,7 +770,7 @@ mod test {
         }
     }
 
-    // #[test]
+    #[test]
     fn test_verbose_remove() {
         let mut list = SkipList::new();
 
