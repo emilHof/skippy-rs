@@ -242,13 +242,23 @@ where
     }
 
     /// Inserts a value in the list given a key.
-    pub fn insert(&mut self, key: K, val: V) {
+    pub fn insert(&mut self, key: K, mut val: V) -> Option<V> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         let insertion_point = unsafe {
-            match self.internal_find(&key) {
-                Ok(insertion_point) => insertion_point,
-                Err(insertion_point) => insertion_point,
+            let insertion_point = self.internal_find(&key);
+
+            if let Ok(insertion_point) = insertion_point {
+                if (*insertion_point).key == key {
+                    std::mem::swap(&mut (*insertion_point).val, &mut val);
+                    return Some(val);
+                }
+
+                // We have a regular Node
+                insertion_point
+            } else {
+                // We are dealing with the head of the list
+                insertion_point.unwrap_err()
             }
         };
 
@@ -259,6 +269,8 @@ where
         unsafe { Self::link_nodes(new_node, link_node) };
 
         self.state.len += 1;
+
+        None
     }
 
     /// This function is unsafe, as it does not check whether new_node or link node are valid
@@ -483,13 +495,10 @@ where
         SkipList::new()
     }
 
-    fn insert(&mut self, key: K, value: V) {
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.insert(key, value)
     }
 
-    fn insert_or_replace(&mut self, key: K, value: V) -> bool {
-        self.insert_or_replace(key, value)
-    }
     fn remove(&mut self, key: &K) -> Option<(K, V)> {
         self.remove(key)
     }

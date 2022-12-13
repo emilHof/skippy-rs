@@ -73,8 +73,6 @@ mod pq_test {
 
             queue.push(rng)
         }
-
-        assert_eq!(queue.len(), 10_000);
     }
 
     #[test]

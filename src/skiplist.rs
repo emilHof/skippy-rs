@@ -6,9 +6,7 @@ pub trait SkipList<K, V> {
 
     fn new() -> Self;
 
-    fn insert(&mut self, key: K, value: V);
-
-    fn insert_or_replace(&mut self, key: K, value: V) -> bool;
+    fn insert(&mut self, key: K, value: V) -> Option<V>;
 
     fn get<'a>(&self, key: &K) -> Option<Self::Entry<'a>>;
 
