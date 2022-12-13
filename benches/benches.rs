@@ -196,7 +196,7 @@ fn remove_skippy(b: &mut Bencher) {
             seed ^= seed << 6;
             seed ^= seed >> 11;
             seed ^= seed << 5;
-            list.insert_or_replace(
+            list.insert(
                 CountOnCmp {
                     key: seed,
                     counter: counter.clone(),
