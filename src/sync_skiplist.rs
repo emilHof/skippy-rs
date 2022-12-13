@@ -1,10 +1,15 @@
-use std::{
-    alloc::{alloc, dealloc, handle_alloc_error, Layout},
+extern crate alloc;
+
+use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+
+use core::{
+    alloc::Layout,
     borrow::Borrow,
     fmt::{Debug, Display},
-    ops::{Deref, DerefMut, Index, IndexMut},
-    ptr::NonNull,
-    sync::atomic::{AtomicPtr, AtomicUsize},
+    mem,
+    ops::{Index, IndexMut},
+    ptr::{self, NonNull},
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
 };
 
 const HEIGHT_BITS: usize = 5;
@@ -45,7 +50,7 @@ impl<K, V> Levels<K, V> {
     fn get_size(height: usize) -> usize {
         assert!(height <= HEIGHT && height > 0);
 
-        core::mem::size_of::<Self>() * height
+        mem::size_of::<Self>() * (height - 1)
     }
 }
 
@@ -73,18 +78,16 @@ struct Node<K, V> {
 
 impl<K, V> Node<K, V> {
     fn new(key: K, val: V, height: usize) -> *mut Self {
-        let node = unsafe {
+        unsafe {
             let node = Self::alloc(height);
 
-            core::ptr::write(&mut (*node).key, key);
-            core::ptr::write(&mut (*node).val, val);
+            ptr::write(&mut (*node).key, key);
+            ptr::write(&mut (*node).val, val);
             node
-        };
-
-        node
+        }
     }
 
-    fn new_rand_height<'a>(key: K, val: V, list: &'a SkipList<K, V>) -> *mut Self {
+    fn new_rand_height(key: K, val: V, list: &SkipList<K, V>) -> *mut Self {
         // construct the base nod
         Self::new(key, val, list.gen_height())
     }
@@ -98,17 +101,9 @@ impl<K, V> Node<K, V> {
             handle_alloc_error(layout);
         }
 
-        core::ptr::write(&mut (*ptr).height, height);
+        ptr::write(&mut (*ptr).height, height);
 
-        for level in 0..height {
-            core::ptr::write(
-                &mut (*ptr).levels[level],
-                [
-                    AtomicPtr::new(core::ptr::null_mut()),
-                    AtomicPtr::new(core::ptr::null_mut()),
-                ],
-            );
-        }
+        ptr::write_bytes((*ptr).levels.pointers.as_mut_ptr(), 0, height);
 
         ptr
     }
@@ -122,39 +117,18 @@ impl<K, V> Node<K, V> {
     }
 
     unsafe fn get_layout(height: usize) -> Layout {
-        let size_self = core::mem::size_of::<Self>();
-        let align = core::mem::align_of::<Self>();
+        let size_self = mem::size_of::<Self>();
+        let align = mem::align_of::<Self>();
         let size_levels = Levels::<K, V>::get_size(height);
-
-        /*
-        println!(
-            "size_self: {}, size_levels: {}, align: {}",
-            size_self, size_levels, align
-        );
-        */
 
         Layout::from_size_align_unchecked(size_self + size_levels, align)
     }
 
     unsafe fn drop(ptr: *mut Self) {
-        core::ptr::drop_in_place(&mut (*ptr).key);
-        core::ptr::drop_in_place(&mut (*ptr).val);
+        ptr::drop_in_place(&mut (*ptr).key);
+        ptr::drop_in_place(&mut (*ptr).val);
 
         Self::dealloc(ptr);
-    }
-}
-
-impl<K, V> Deref for Node<K, V> {
-    type Target = Levels<K, V>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.levels
-    }
-}
-
-impl<K, V> DerefMut for Node<K, V> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.levels
     }
 }
 
@@ -178,7 +152,11 @@ impl<K, V> SkipList<K, V> {
 
     /// Gets the length of the [SkipList](SkipList).
     pub fn len(&self) -> usize {
-        self.state.len.load(std::sync::atomic::Ordering::Relaxed)
+        self.state.len.load(Ordering::Relaxed)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.len.load(Ordering::Relaxed) < 1
     }
 
     /// Randomly generates a height that is within the right parameters.
@@ -186,36 +164,23 @@ impl<K, V> SkipList<K, V> {
     /// at most one level higher then the previously largest height in the
     /// list.
     fn gen_height(&self) -> usize {
-        let mut seed = self.state.seed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut seed = self.state.seed.load(Ordering::Relaxed);
         seed ^= seed << 13;
         seed ^= seed >> 17;
         seed ^= seed << 5;
 
-        self.state
-            .seed
-            .store(seed, std::sync::atomic::Ordering::Relaxed);
+        self.state.seed.store(seed, Ordering::Relaxed);
 
         let mut height = std::cmp::min(HEIGHT, seed.trailing_zeros() as usize + 1);
 
         let head = unsafe { &(*self.head.as_ptr()) };
 
-        while height >= 4
-            && head.levels[height - 2][1]
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .is_null()
-        {
+        while height >= 4 && head.levels[height - 2][1].load(Ordering::Relaxed).is_null() {
             height -= 1;
         }
 
-        if height
-            > self
-                .state
-                .max_height
-                .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            self.state
-                .max_height
-                .store(height, std::sync::atomic::Ordering::Relaxed);
+        if height > self.state.max_height.load(Ordering::Relaxed) {
+            self.state.max_height.store(height, Ordering::Relaxed);
         }
 
         height
@@ -253,9 +218,7 @@ where
 
         unsafe { Self::link_nodes(new_node, link_node) };
 
-        self.state
-            .len
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.state.len.fetch_add(1, Ordering::Relaxed);
 
         None
     }
@@ -272,27 +235,25 @@ where
         for level in 0..((*new_node).height) {
             // move backwards until a pointer tower of sufficient hight is reached
             while (*link_node).height <= level {
-                link_node =
-                    (*link_node).levels[level - 1][0].load(std::sync::atomic::Ordering::Relaxed);
+                link_node = (*link_node).levels[level - 1][0].load(Ordering::Relaxed);
             }
 
             // perform the re-linking
-            (*new_node).levels[level][0].store(link_node, std::sync::atomic::Ordering::Relaxed);
+            (*new_node).levels[level][0].store(link_node, Ordering::Relaxed);
             (*new_node).levels[level][1].store(
-                (*link_node).levels[level][1].load(std::sync::atomic::Ordering::Relaxed),
-                std::sync::atomic::Ordering::Relaxed,
+                (*link_node).levels[level][1].load(Ordering::Relaxed),
+                Ordering::Relaxed,
             );
-            let old_right =
-                (*link_node).levels[level][1].load(std::sync::atomic::Ordering::Relaxed);
+            let old_right = (*link_node).levels[level][1].load(Ordering::Relaxed);
             if !old_right.is_null() {
-                (*old_right).levels[level][0].store(new_node, std::sync::atomic::Ordering::Relaxed);
+                (*old_right).levels[level][0].store(new_node, Ordering::Relaxed);
             }
-            (*link_node).levels[level][1].store(new_node, std::sync::atomic::Ordering::Relaxed);
+            (*link_node).levels[level][1].store(new_node, Ordering::Relaxed);
         }
     }
 
     pub fn remove(&self, key: &K) -> Option<(K, V)> {
-        if self.len() < 1 {
+        if self.is_empty() {
             return None;
         }
 
@@ -300,9 +261,7 @@ where
             match self.find(key) {
                 Err(_) => return None,
                 Ok(target) => {
-                    if target.is_null() {
-                        return None;
-                    } else if (*target).key != *key {
+                    if target.is_null() || (*target).key != *key {
                         return None;
                     }
                     target
@@ -320,9 +279,7 @@ where
             (key, val)
         };
 
-        self.state
-            .len
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.state.len.fetch_sub(1, Ordering::Relaxed);
 
         Some((key, val))
     }
@@ -337,17 +294,13 @@ where
         unsafe {
             for level in (0..(*node).height).rev() {
                 let [ref left, ref right] = (*node).levels[level];
-                (*left.load(std::sync::atomic::Ordering::Relaxed)).levels[level][1].store(
-                    right.load(std::sync::atomic::Ordering::Relaxed),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                let right_ptr = right.load(std::sync::atomic::Ordering::Relaxed);
+                (*left.load(Ordering::Relaxed)).levels[level][1]
+                    .store(right.load(Ordering::Relaxed), Ordering::Relaxed);
+                let right_ptr = right.load(Ordering::Relaxed);
 
                 if !right_ptr.is_null() {
-                    (*right_ptr).levels[level][0].store(
-                        left.load(std::sync::atomic::Ordering::Relaxed),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    (*right_ptr).levels[level][0]
+                        .store(left.load(Ordering::Relaxed), Ordering::Relaxed);
                 }
             }
         }
@@ -357,20 +310,13 @@ where
     /// cause UB if not handled appropriately. If the return value is Ok(...) then it is a
     /// regular Node. If it is Err(...) then it is the head.
     unsafe fn find(&self, key: &K) -> Result<*mut Node<K, V>, *mut Node<K, V>> {
-        let mut level = self
-            .state
-            .max_height
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut level = self.state.max_height.load(Ordering::Relaxed);
         let head = unsafe { &(*self.head.as_ptr()) };
 
         let mut prev = [&head.levels; HEIGHT];
 
         // find the first and highest node tower
-        while level > 1
-            && head.levels[level - 1][1]
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .is_null()
-        {
+        while level > 1 && head.levels[level - 1][1].load(Ordering::Relaxed).is_null() {
             level -= 1;
         }
 
@@ -380,24 +326,20 @@ where
             'search: loop {
                 while level > 1
                     && ((*curr).levels[level - 1][1]
-                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .load(Ordering::Relaxed)
                         .is_null()
-                        || (*(*curr).levels[level - 1][1]
-                            .load(std::sync::atomic::Ordering::Relaxed))
-                        .key > *key)
+                        || (*(*curr).levels[level - 1][1].load(Ordering::Relaxed)).key > *key)
                 {
                     prev[level - 1] = &(*curr).levels;
                     level -= 1;
                 }
 
                 if !(*curr).levels[level - 1][1]
-                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .load(Ordering::Relaxed)
                     .is_null()
-                    && (*(*curr).levels[level - 1][1].load(std::sync::atomic::Ordering::Relaxed))
-                        .key
-                        <= *key
+                    && (*(*curr).levels[level - 1][1].load(Ordering::Relaxed)).key <= *key
                 {
-                    curr = (*curr).levels[level - 1][1].load(std::sync::atomic::Ordering::Relaxed);
+                    curr = (*curr).levels[level - 1][1].load(Ordering::Relaxed);
                 } else {
                     (0..level).for_each(|i| prev[i] = &(*curr).levels);
                     break 'search;
@@ -413,7 +355,7 @@ where
     }
 
     pub fn get<'a>(&self, key: &K) -> Option<Entry<'a, K, V>> {
-        if self.len() < 1 {
+        if self.is_empty() {
             return None;
         }
 
@@ -421,10 +363,10 @@ where
         let target = unsafe {
             let target = self.find(key);
 
-            if let Err(_) = target {
-                return None;
+            if let Ok(target) = target {
+                target
             } else {
-                target.unwrap()
+                return None;
             }
         };
 
@@ -446,13 +388,11 @@ where
     }
 
     pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
-        if self.len() < 1 {
+        if self.is_empty() {
             return None;
         }
 
-        let first = unsafe {
-            (*self.head.as_ptr()).levels[0][1].load(std::sync::atomic::Ordering::Relaxed)
-        };
+        let first = unsafe { (*self.head.as_ptr()).levels[0][1].load(Ordering::Relaxed) };
 
         unsafe {
             if !first.is_null() {
@@ -468,13 +408,11 @@ where
     }
 
     pub fn get_last<'a>(&self) -> Option<Entry<'a, K, V>> {
-        if self.len() < 1 {
+        if self.is_empty() {
             return None;
         }
 
-        let curr = unsafe {
-            (*self.head.as_ptr()).levels[0][1].load(std::sync::atomic::Ordering::Relaxed)
-        };
+        let curr = unsafe { (*self.head.as_ptr()).levels[0][1].load(Ordering::Relaxed) };
 
         unsafe {
             if curr.is_null() {
@@ -483,11 +421,8 @@ where
 
             let mut curr = &(*curr);
 
-            while !curr.levels[0][1]
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .is_null()
-            {
-                curr = &(*curr.levels[0][1].load(std::sync::atomic::Ordering::Relaxed));
+            while !curr.levels[0][1].load(Ordering::Relaxed).is_null() {
+                curr = &(*curr.levels[0][1].load(Ordering::Relaxed));
             }
 
             Some(Entry {
@@ -500,19 +435,23 @@ where
 
 impl<K, V> Drop for SkipList<K, V> {
     fn drop(&mut self) {
-        let mut node = unsafe {
-            (*self.head.as_ptr()).levels[0][1].load(std::sync::atomic::Ordering::Relaxed)
-        };
+        let mut node = unsafe { (*self.head.as_ptr()).levels[0][1].load(Ordering::Relaxed) };
 
         while !node.is_null() {
             unsafe {
                 let temp = node;
-                node = (*temp).levels[0][1].load(std::sync::atomic::Ordering::Relaxed);
+                node = (*temp).levels[0][1].load(Ordering::Relaxed);
                 Node::<K, V>::drop(temp);
             }
         }
 
         unsafe { Head::<K, V>::drop(self.head) };
+    }
+}
+
+impl<K, V> Default for SkipList<K, V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -564,7 +503,7 @@ impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
 
 impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
     fn as_ref(&self) -> &V {
-        &self.val
+        self.val
     }
 }
 
@@ -582,10 +521,6 @@ where
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key && self.val == other.val
     }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.key != other.key && self.val != other.val
-    }
 }
 
 impl<K, V> Debug for Node<K, V>
@@ -601,7 +536,7 @@ where
             self.val,
             self.height,
             (0..self.height).fold(String::new(), |acc, level| {
-                format!("{}{:?}, ", acc, self.pointers[level])
+                format!("{}{:?}, ", acc, self.levels[level])
             })
         )
     }
@@ -613,10 +548,10 @@ where
     V: Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        (1..=self.pointers.len()).try_for_each(|level| {
-            write!(
+        (1..=self.levels.pointers.len()).try_for_each(|level| {
+            writeln!(
                 f,
-                "[key:  {:?}, val: {:?}, level: {}]\n",
+                "[key:  {:?}, val: {:?}, level: {}]",
                 self.key, self.val, level,
             )
         })
@@ -658,7 +593,7 @@ mod test {
 
     #[test]
     fn test_insert() {
-        let mut list = SkipList::new();
+        let list = SkipList::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..100_000 {
@@ -675,7 +610,7 @@ mod test {
         let node = Node::new_rand_height("Hello", "There!", &mut list);
 
         assert!(!node.is_null());
-        let height = unsafe { (*node).pointers.len() };
+        let height = unsafe { (*node).levels.pointers.len() };
 
         println!("height: {}", height);
 
@@ -690,33 +625,31 @@ mod test {
 
     #[test]
     fn test_insert_verbose() {
-        let mut list = SkipList::new();
+        let list = SkipList::new();
 
         list.insert(1, 1);
         unsafe {
             let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(std::sync::atomic::Ordering::Relaxed).is_null() {
+            while !node.load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key
+                    (*node.load(Ordering::Relaxed)).key,
+                    (*node.load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [ref left, _] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
-                print!("\n");
+                println!();
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [_, ref right] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", right);
                 }
-                print!("\n");
-                node = &(*node.load(std::sync::atomic::Ordering::Relaxed)).pointers[0][1];
+                println!();
+                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
             }
         }
 
@@ -727,28 +660,26 @@ mod test {
 
         unsafe {
             let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(std::sync::atomic::Ordering::Relaxed).is_null() {
+            while !node.load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key
+                    (*node.load(Ordering::Relaxed)).key,
+                    (*node.load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [ref left, _] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
-                print!("\n");
+                println!();
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [_, ref right] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", right);
                 }
-                print!("\n");
-                node = &(*node.load(std::sync::atomic::Ordering::Relaxed)).pointers[0][1];
+                println!();
+                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
             }
         }
 
@@ -759,28 +690,26 @@ mod test {
 
         unsafe {
             let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(std::sync::atomic::Ordering::Relaxed).is_null() {
+            while !node.load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key
+                    (*node.load(Ordering::Relaxed)).key,
+                    (*node.load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [ref left, _] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
-                print!("\n");
+                println!();
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [_, ref right] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", right);
                 }
-                print!("\n");
-                node = &(*node.load(std::sync::atomic::Ordering::Relaxed)).pointers[0][1];
+                println!();
+                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
             }
         }
 
@@ -789,7 +718,7 @@ mod test {
 
     #[test]
     fn test_remove() {
-        let mut list = SkipList::new();
+        let list = SkipList::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..100_000 {
@@ -808,7 +737,7 @@ mod test {
 
     #[test]
     fn test_verbose_remove() {
-        let mut list = SkipList::new();
+        let list = SkipList::new();
 
         list.insert(1, 1);
         list.insert(2, 2);
@@ -816,28 +745,26 @@ mod test {
 
         unsafe {
             let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(std::sync::atomic::Ordering::Relaxed).is_null() {
+            while !node.load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key
+                    (*node.load(Ordering::Relaxed)).key,
+                    (*node.load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [ref left, _] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
-                print!("\n");
+                println!();
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [_, ref right] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", right);
                 }
-                print!("\n");
-                node = &(*node.load(std::sync::atomic::Ordering::Relaxed)).pointers[0][1];
+                println!();
+                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
             }
         }
 
@@ -852,28 +779,26 @@ mod test {
 
         unsafe {
             let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(std::sync::atomic::Ordering::Relaxed).is_null() {
+            while !node.load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key,
-                    (*node.load(std::sync::atomic::Ordering::Relaxed)).key
+                    (*node.load(Ordering::Relaxed)).key,
+                    (*node.load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [ref left, _] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
-                print!("\n");
+                println!();
                 print!("                                ");
-                for level in 0..(*node.load(std::sync::atomic::Ordering::Relaxed)).height {
-                    let [_, ref right] =
-                        (*node.load(std::sync::atomic::Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.load(Ordering::Relaxed)).height {
+                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", right);
                 }
-                print!("\n");
-                node = &(*node.load(std::sync::atomic::Ordering::Relaxed)).pointers[0][1];
+                println!();
+                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
             }
         }
     }

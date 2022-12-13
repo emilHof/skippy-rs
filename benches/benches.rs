@@ -54,7 +54,7 @@ fn insert_skippy(b: &mut Bencher) {
     let counter = Arc::new(AtomicUsize::new(0));
 
     b.iter(|| {
-        let mut list = SkipList::new();
+        let list = SkipList::new();
 
         for _ in 0..upper {
             seed ^= seed << 6;
@@ -109,7 +109,7 @@ fn insert_crossbeam(b: &mut Bencher) {
 fn get_skippy(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
-    let mut list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
+    let list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -187,7 +187,7 @@ fn get_crossbeam(b: &mut Bencher) {
 fn remove_skippy(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
-    let mut list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
+    let list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
