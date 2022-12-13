@@ -6,11 +6,11 @@ pub trait SkipList<K, V> {
 
     fn new() -> Self;
 
-    fn insert(&mut self, key: K, value: V) -> Option<V>;
+    fn insert(&self, key: K, value: V) -> Option<V>;
 
     fn get<'a>(&self, key: &K) -> Option<Self::Entry<'a>>;
 
-    fn remove(&mut self, key: &K) -> Option<(K, V)>;
+    fn remove(&self, key: &K) -> Option<(K, V)>;
 
     fn front<'a>(&self) -> Option<Self::Entry<'a>>;
 
