@@ -1,6 +1,6 @@
 #![feature(test)]
 use crossbeam_skiplist::SkipMap;
-use skippy::sync_skiplist::SkipList;
+use skippy::SkipList;
 use std::sync::{atomic::AtomicUsize, Arc};
 
 extern crate test;
