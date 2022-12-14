@@ -17,4 +17,8 @@ pub trait SkipList<K, V> {
     fn last<'a>(&self) -> Option<Self::Entry<'a>>;
 
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() < 1
+    }
 }

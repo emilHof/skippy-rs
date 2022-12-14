@@ -1,37 +1,24 @@
-use crate::skiplist;
-use crate::sync_skiplist;
+use crate::internal::skiplist::SkipList;
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 
-pub struct PriorityQueue<L, V> {
+pub struct PriorityQueue<V, L> {
     queue: L,
     _phantom: PhantomData<V>,
 }
 
-impl<V> PriorityQueue<sync_skiplist::SkipList<V, ()>, V> {
-    pub fn new() -> PriorityQueue<sync_skiplist::SkipList<V, ()>, V> {
+impl<V> PriorityQueue<V, SkipList<V, ()>> {
+    pub fn new() -> Self {
         PriorityQueue {
-            queue: sync_skiplist::SkipList::new(),
+            queue: SkipList::new(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<L, V> PriorityQueue<L, V>
+impl<'a, V, L> PriorityQueue<V, L>
 where
-    L: skiplist::SkipList<V, ()> + Send + Sync,
-{
-    pub fn new_shared() -> Self {
-        PriorityQueue {
-            queue: L::new(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, L, V> PriorityQueue<L, V>
-where
-    L: skiplist::SkipList<V, ()> + 'a,
+    L: crate::skiplist::SkipList<V, ()> + 'a,
     V: Ord + 'a,
     L::Entry<'a>: Borrow<V>,
 {
@@ -53,6 +40,10 @@ where
     pub fn len(&self) -> usize {
         self.queue.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -67,8 +58,6 @@ mod pq_test {
         let mut rng: u16 = rand::random();
 
         for _ in 0..10_000 {
-            rng ^= rng << 6;
-            rng ^= rng >> 9;
             rng ^= rng << 3;
 
             queue.push(rng)

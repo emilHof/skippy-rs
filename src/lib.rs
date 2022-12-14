@@ -7,5 +7,7 @@
     unreachable_pub
 )]
 pub mod collections;
+pub mod internal;
 pub mod skiplist;
-pub mod sync_skiplist;
+
+pub use internal::skiplist::SkipList;
