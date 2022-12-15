@@ -1,17 +1,15 @@
-use core::{
-    borrow::Borrow,
-    fmt::{Debug, Display},
-    ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
 
-use crate::internal::utils::{skiplist_basics, GeneratesHeight, Head, Levels, Node, HEIGHT};
+use crate::internal::utils::{
+    skiplist_basics, GeneratesHeight, Head, Levels, Node, SearchResult, HEIGHT,
+};
 
 skiplist_basics!(SkipList);
 
-impl<K, V> SkipList<K, V>
+impl<'domain, K, V> SkipList<'domain, K, V>
 where
-    K: Ord,
+    K: Ord + Sync,
+    V: Sync,
 {
     /// Inserts a value in the list given a key.
     pub fn insert(&self, key: K, mut val: V) -> Option<V> {
@@ -31,7 +29,7 @@ where
                 SearchResult { prev, .. } => {
                     let new_node = Node::new_rand_height(key, val, self);
 
-                    Self::link_nodes(new_node, prev);
+                    self.link_nodes(new_node, prev);
 
                     self.state.len.fetch_add(1, Ordering::Relaxed);
 
@@ -48,12 +46,14 @@ where
     /// - link_node cannot be null
     /// - no pointer tower along the path can have a null pointer pointing backwards
     /// - a tower of sufficient height must eventually be reached, the list head can be this tower
-    unsafe fn link_nodes(new_node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
+    unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
         // iterate over all the levels in the new nodes pointer tower
         for (i, levels) in prev.iter().enumerate().take((*new_node).height) {
             // move backwards until a pointer tower of sufficient hight is reached
-            (*new_node).levels[i][1].store(levels[i][1].load(Ordering::Relaxed), Ordering::Relaxed);
-            levels[i][1].store(new_node, Ordering::Relaxed);
+            unsafe {
+                (*new_node).levels[i].store_ptr(levels[i].load_ptr());
+                levels[i].store_ptr(new_node);
+            }
         }
     }
 
@@ -91,10 +91,7 @@ where
         }
         unsafe {
             for (i, levels) in prev.iter().enumerate().take((*node).height) {
-                levels[i][1].store(
-                    (*node).levels[i][1].load(Ordering::Relaxed),
-                    Ordering::Relaxed,
-                );
+                levels[i].store_ptr((*node).levels[i].load_ptr());
             }
         }
     }
@@ -109,7 +106,7 @@ where
         let mut prev = [&head.levels; HEIGHT];
 
         // find the first and highest node tower
-        while level > 1 && head.levels[level - 1][1].load(Ordering::Relaxed).is_null() {
+        while level > 1 && head.levels[level - 1].load_ptr().is_null() {
             level -= 1;
         }
 
@@ -118,20 +115,18 @@ where
 
         unsafe {
             while level > 0 {
-                if (*curr).levels[level - 1][1]
-                    .load(Ordering::Relaxed)
-                    .is_null()
-                    || (*(*curr).levels[level - 1][1].load(Ordering::Relaxed)).key >= *key
+                if (*curr).levels[level - 1].load_ptr().is_null()
+                    || (*(*curr).levels[level - 1].load_ptr()).key >= *key
                 {
                     prev[level - 1] = &(*curr).levels;
                     level -= 1;
                 } else {
-                    curr = (*curr).levels[level - 1][1].load(Ordering::Relaxed)
+                    curr = (*curr).levels[level - 1].load_ptr()
                 }
             }
         }
 
-        let next = (*curr).levels[level][1].load(Ordering::Relaxed);
+        let next = (*curr).levels[level].load_ptr();
 
         if !next.is_null() && &(*next).key == key {
             SearchResult {
@@ -171,7 +166,7 @@ where
             return None;
         }
 
-        let first = unsafe { (*self.head.as_ptr()).levels[0][1].load(Ordering::Relaxed) };
+        let first = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
 
         unsafe {
             if !first.is_null() {
@@ -191,7 +186,7 @@ where
             return None;
         }
 
-        let curr = unsafe { (*self.head.as_ptr()).levels[0][1].load(Ordering::Relaxed) };
+        let curr = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
 
         unsafe {
             if curr.is_null() {
@@ -200,8 +195,8 @@ where
 
             let mut curr = &(*curr);
 
-            while !curr.levels[0][1].load(Ordering::Relaxed).is_null() {
-                curr = &(*curr.levels[0][1].load(Ordering::Relaxed));
+            while !curr.levels[0].load_ptr().is_null() {
+                curr = &(*curr.levels[0].load_ptr());
             }
 
             Some(Entry {
@@ -212,15 +207,20 @@ where
     }
 }
 
-impl<K, V> Default for SkipList<K, V> {
+impl<'domain, K, V> Default for SkipList<'domain, K, V>
+where
+    K: Sync,
+    V: Sync,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K, V> crate::skiplist::SkipList<K, V> for SkipList<K, V>
+impl<'domain, K, V> crate::skiplist::SkipList<K, V> for SkipList<'domain, K, V>
 where
-    K: Ord,
+    K: Ord + Sync,
+    V: Sync,
 {
     type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a;
 
@@ -269,74 +269,6 @@ impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
         self.val
     }
 }
-
-#[derive(Debug)]
-pub struct SearchResult<'a, K, V> {
-    prev: [&'a Levels<K, V>; HEIGHT],
-    target: Option<NonNull<Node<K, V>>>,
-}
-
-impl<K, V> PartialEq for Node<K, V>
-where
-    K: PartialEq,
-    V: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.val == other.val
-    }
-}
-
-impl<K, V> Debug for Node<K, V>
-where
-    K: Debug,
-    V: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Node {{ key:  {:?}, val: {:?}, height: {}, levels: [{}]}}",
-            self.key,
-            self.val,
-            self.height,
-            (0..self.height).fold(String::new(), |acc, level| {
-                format!("{}{:?}, ", acc, self.levels[level])
-            })
-        )
-    }
-}
-
-impl<K, V> Display for Node<K, V>
-where
-    K: Debug,
-    V: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        (1..=self.levels.pointers.len()).try_for_each(|level| {
-            writeln!(
-                f,
-                "[key:  {:?}, val: {:?}, level: {}]",
-                self.key, self.val, level,
-            )
-        })
-    }
-}
-
-pub(crate) struct ListState {
-    len: AtomicUsize,
-    max_height: AtomicUsize,
-    seed: AtomicUsize,
-}
-
-impl ListState {
-    pub(crate) fn new() -> Self {
-        ListState {
-            len: AtomicUsize::new(0),
-            max_height: AtomicUsize::new(1),
-            seed: AtomicUsize::new(rand::random()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -361,7 +293,7 @@ mod test {
 
     #[test]
     fn test_new_list() {
-        let _: SkipList<usize, usize> = SkipList::new();
+        let _: SkipList<'_, usize, usize> = SkipList::new();
     }
 
     #[test]
@@ -379,7 +311,7 @@ mod test {
 
     #[test]
     fn test_rand_height() {
-        let mut list: SkipList<i32, i32> = SkipList::new();
+        let mut list: SkipList<'_, i32, i32> = SkipList::new();
         let node = Node::new_rand_height("Hello", "There!", &mut list);
 
         assert!(!node.is_null());
@@ -402,27 +334,21 @@ mod test {
 
         list.insert(1, 1);
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 
@@ -432,27 +358,21 @@ mod test {
         list.insert(2, 2);
 
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 
@@ -462,27 +382,21 @@ mod test {
         list.insert(5, 3);
 
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 
@@ -518,27 +432,21 @@ mod test {
         list.insert(5, 3);
 
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 
@@ -548,27 +456,21 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 
@@ -586,27 +488,21 @@ mod test {
         println!("/////////////////////////////////////////////////////////////////////////");
 
         unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0][1];
-            while !node.load(Ordering::Relaxed).is_null() {
+            let mut node = &(*list.head.as_ptr()).levels[0];
+            while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
                     node,
-                    (*node.load(Ordering::Relaxed)).key,
-                    (*node.load(Ordering::Relaxed)).key
+                    (*node.as_std().load(Ordering::Relaxed)).key,
+                    (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [ref left, _] = (*node.load(Ordering::Relaxed)).levels[level];
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
                 println!();
-                print!("                                ");
-                for level in 0..(*node.load(Ordering::Relaxed)).height {
-                    let [_, ref right] = (*node.load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", right);
-                }
-                println!();
-                node = &(*node.load(Ordering::Relaxed)).levels[0][1];
+                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
             }
         }
 

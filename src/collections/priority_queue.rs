@@ -7,7 +7,10 @@ pub struct PriorityQueue<V, L> {
     _phantom: PhantomData<V>,
 }
 
-impl<V> PriorityQueue<V, SkipList<V, ()>> {
+impl<'domain, V> PriorityQueue<V, SkipList<'domain, V, ()>>
+where
+    V: Sync,
+{
     pub fn new() -> Self {
         PriorityQueue {
             queue: SkipList::new(),
