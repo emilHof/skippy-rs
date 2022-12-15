@@ -1,5 +1,7 @@
 use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
 
+use haphazard::raw::Reclaim;
+
 use crate::internal::utils::{
     skiplist_basics, GeneratesHeight, Levels, Node, SearchResult, HEIGHT,
 };
@@ -8,8 +10,8 @@ skiplist_basics!(SkipList);
 
 impl<'domain, K, V> SkipList<'domain, K, V>
 where
-    K: Ord + Sync,
-    V: Sync,
+    K: Ord + Send + Sync,
+    V: Send + Sync,
 {
     /// Inserts a value in the list given a key.
     pub fn insert(&self, key: K, mut val: V) -> Option<V> {
@@ -57,7 +59,11 @@ where
         }
     }
 
-    pub fn remove(&self, key: &K) -> Option<(K, V)> {
+    pub fn remove(&self, key: &K) -> Option<(K, V)>
+    where
+        K: Send,
+        V: Send,
+    {
         if self.is_empty() {
             return None;
         }
@@ -73,7 +79,15 @@ where
                     let val = core::ptr::read(&(*target).val);
 
                     self.unlink(target, prev);
-                    Node::<K, V>::dealloc(target);
+                    self.garbage
+                        .domain
+                        .retire_ptr_with(target, |ptr: *mut dyn Reclaim| {
+                            Node::<K, V>::dealloc(ptr as *mut Node<K, V>)
+                        });
+
+                    // We see if we can drop some pointers in the list.
+                    self.garbage.domain.eager_reclaim();
+
                     self.state.len.fetch_sub(1, Ordering::Relaxed);
 
                     Some((key, val))
@@ -219,8 +233,8 @@ where
 
 impl<'domain, K, V> crate::skiplist::SkipList<K, V> for SkipList<'domain, K, V>
 where
-    K: Ord + Sync,
-    V: Sync,
+    K: Ord + Send + Sync,
+    V: Send + Sync,
 {
     type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a;
 
@@ -270,7 +284,7 @@ impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
     }
 }
 #[cfg(test)]
-mod test {
+mod sync_test {
     use super::*;
 
     #[test]

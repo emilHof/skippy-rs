@@ -34,8 +34,8 @@ impl<'domain> Can<'domain> {
 impl<'domain> Clone for Can<'domain> {
     fn clone(&self) -> Self {
         Can {
-            domain: &self.domain,
-            hp: HazardPointer::many_in_domain(&self.domain),
+            domain: self.domain,
+            hp: HazardPointer::many_in_domain(self.domain),
         }
     }
 }
@@ -85,8 +85,9 @@ macro_rules! skiplist_basics {
             K: core::marker::Sync,
             V: core::marker::Sync,
         {
-            head: core::ptr::NonNull<crate::internal::skiplist::Head<K, V>>,
+            head: core::ptr::NonNull<crate::internal::utils::Head<K, V>>,
             state: crate::internal::utils::ListState,
+            #[allow(dead_code)]
             garbage: crate::internal::utils::Can<'domain>,
         }
 
@@ -97,7 +98,7 @@ macro_rules! skiplist_basics {
         {
             pub fn new() -> Self {
                 $my_list {
-                    head: crate::internal::skiplist::Head::new(),
+                    head: crate::internal::utils::Head::new(),
                     state: crate::internal::utils::ListState::new(),
                     garbage: crate::internal::utils::Can::new(),
                 }
@@ -160,11 +161,11 @@ macro_rules! skiplist_basics {
                     unsafe {
                         let temp = node;
                         node = (*temp).levels[0].load_ptr();
-                        crate::internal::skiplist::Node::<K, V>::drop(temp);
+                        crate::internal::utils::Node::<K, V>::drop(temp);
                     }
                 }
 
-                unsafe { crate::internal::skiplist::Head::<K, V>::drop(self.head) };
+                unsafe { crate::internal::utils::Head::<K, V>::drop(self.head) };
             }
         }
     };
