@@ -42,7 +42,7 @@ impl<T> Padded<T> {
         Padded(t)
     }
 
-    pub fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> T {
         self.0
     }
 }

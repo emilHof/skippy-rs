@@ -50,7 +50,7 @@ where
     /// - a tower of sufficient height must eventually be reached, the list head can be this tower
     unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
         // iterate over all the levels in the new nodes pointer tower
-        for (i, levels) in prev.iter().enumerate().take((*new_node).height) {
+        for (i, levels) in prev.iter().enumerate().take((*new_node).height()) {
             // move backwards until a pointer tower of sufficient hight is reached
             unsafe {
                 (*new_node).levels[i].store_ptr(levels[i].load_ptr());
@@ -104,15 +104,12 @@ where
             panic!()
         }
         unsafe {
-            for (i, levels) in prev.iter().enumerate().take((*node).height) {
+            for (i, levels) in prev.iter().enumerate().take((*node).height()) {
                 levels[i].store_ptr((*node).levels[i].load_ptr());
             }
         }
     }
 
-    /// This method is `unsafe` as it may return the head typecast as a Node, which can
-    /// cause UB if not handled appropriately. If the return value is Ok(...) then it is a
-    /// regular Node. If it is Err(...) then it is the head.
     unsafe fn find<'a>(&'a self, key: &K) -> SearchResult<'a, K, V> {
         let mut level = self.state.max_height.load(Ordering::Relaxed);
         let head = unsafe { &(*self.head.as_ptr()) };
@@ -127,6 +124,8 @@ where
         let mut curr = self.head.as_ptr().cast::<Node<K, V>>();
         prev[level - 1] = &(*curr).levels;
 
+        // steps:
+        // 1.
         unsafe {
             while level > 0 {
                 if (*curr).levels[level - 1].load_ptr().is_null()
@@ -357,7 +356,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
@@ -381,7 +380,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
@@ -405,7 +404,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
@@ -455,7 +454,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
@@ -479,7 +478,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }
@@ -511,7 +510,7 @@ mod sync_test {
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height {
+                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
                     print!("{:?} | ", left);
                 }

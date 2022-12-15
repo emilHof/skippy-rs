@@ -3,12 +3,16 @@ extern crate alloc;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use haphazard::AtomicPtr;
 
+const REMOVED_MASK: u32 = (1 as u32) << 31;
+const HEIGHT_MASK: u32 = (0 as u32) << 31;
+
 use core::{
     fmt::Debug,
     fmt::Display,
     mem,
     ops::Index,
     ptr::{self, NonNull},
+    sync::atomic::AtomicU32,
 };
 
 /// Head stores the first pointer tower at the beginning of the list. It is always of maximum
@@ -16,7 +20,7 @@ use core::{
 pub(crate) struct Head<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
-    pub(crate) height: usize,
+    pub(crate) height: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -61,7 +65,7 @@ impl<K, V> Index<usize> for Levels<K, V> {
 pub(crate) struct Node<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
-    pub(crate) height: usize,
+    pub(crate) height: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -94,7 +98,7 @@ impl<K, V> Node<K, V> {
             handle_alloc_error(layout);
         }
 
-        ptr::write(&mut (*ptr).height, height);
+        ptr::write(&mut (*ptr).height, AtomicU32::new(height as u32));
 
         ptr::write_bytes((*ptr).levels.pointers.as_mut_ptr(), 0, height);
 
@@ -102,7 +106,7 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) unsafe fn dealloc(ptr: *mut Self) {
-        let height = (*ptr).height;
+        let height = (*ptr).height();
 
         let layout = Self::get_layout(height);
 
@@ -122,6 +126,10 @@ impl<K, V> Node<K, V> {
         ptr::drop_in_place(&mut (*ptr).val);
 
         Self::dealloc(ptr);
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        (self.height.load(std::sync::atomic::Ordering::Relaxed) << 1 >> 1) as usize
     }
 }
 
@@ -146,8 +154,8 @@ where
             "Node {{ key:  {:?}, val: {:?}, height: {}, levels: [{}]}}",
             self.key,
             self.val,
-            self.height,
-            (0..self.height).fold(String::new(), |acc, level| {
+            self.height(),
+            (0..self.height()).fold(String::new(), |acc, level| {
                 format!("{}{:?}, ", acc, self.levels[level])
             })
         )
