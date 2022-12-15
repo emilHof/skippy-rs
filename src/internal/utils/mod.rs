@@ -7,8 +7,10 @@ use core::{
 };
 
 mod node;
+mod padded;
 
 pub(crate) use node::{Head, Levels, Node};
+pub(crate) use padded::Padded;
 
 pub(crate) const HEIGHT_BITS: usize = 5;
 
@@ -86,7 +88,7 @@ macro_rules! skiplist_basics {
             V: core::marker::Sync,
         {
             head: core::ptr::NonNull<crate::internal::utils::Head<K, V>>,
-            state: crate::internal::utils::ListState,
+            state: crate::internal::utils::Padded<crate::internal::utils::ListState>,
             #[allow(dead_code)]
             garbage: crate::internal::utils::Can<'domain>,
         }
@@ -99,7 +101,9 @@ macro_rules! skiplist_basics {
             pub fn new() -> Self {
                 $my_list {
                     head: crate::internal::utils::Head::new(),
-                    state: crate::internal::utils::ListState::new(),
+                    state: crate::internal::utils::Padded::new(
+                        crate::internal::utils::ListState::new(),
+                    ),
                     garbage: crate::internal::utils::Can::new(),
                 }
             }
