@@ -4,7 +4,6 @@ use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use haphazard::AtomicPtr;
 
 const REMOVED_MASK: u32 = (1 as u32) << 31;
-const HEIGHT_MASK: u32 = (0 as u32) << 31;
 
 use core::{
     fmt::Debug,
@@ -13,6 +12,7 @@ use core::{
     ops::Index,
     ptr::{self, NonNull},
     sync::atomic::AtomicU32,
+    sync::atomic::Ordering,
 };
 
 /// Head stores the first pointer tower at the beginning of the list. It is always of maximum
@@ -20,7 +20,7 @@ use core::{
 pub(crate) struct Head<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
-    pub(crate) height: AtomicU32,
+    pub(crate) height_and_removed: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -65,7 +65,7 @@ impl<K, V> Index<usize> for Levels<K, V> {
 pub(crate) struct Node<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
-    pub(crate) height: AtomicU32,
+    pub(crate) height_and_removed: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -98,7 +98,10 @@ impl<K, V> Node<K, V> {
             handle_alloc_error(layout);
         }
 
-        ptr::write(&mut (*ptr).height, AtomicU32::new(height as u32));
+        ptr::write(
+            &mut (*ptr).height_and_removed,
+            AtomicU32::new(height as u32),
+        );
 
         ptr::write_bytes((*ptr).levels.pointers.as_mut_ptr(), 0, height);
 
@@ -129,7 +132,35 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.height.load(std::sync::atomic::Ordering::Relaxed) << 1 >> 1) as usize
+        (self.height_and_removed.load(Ordering::Relaxed) << 1 >> 1) as usize
+    }
+
+    pub(crate) fn removed(&self) -> bool {
+        self.height_and_removed
+            .load(Ordering::SeqCst)
+            .leading_zeros()
+            == 0
+    }
+
+    pub(crate) fn set_removed(&self) -> Result<u32, ()> {
+        let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
+        // if removed is set then someone else is already removing the node
+        if height_and_removed.leading_zeros() == 0 {
+            return Err(());
+        }
+
+        // set removed
+        let new_height_and_removed = height_and_removed | REMOVED_MASK;
+
+        // try to exchange
+        self.height_and_removed
+            .compare_exchange(
+                height_and_removed,
+                new_height_and_removed,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .map_err(|_| ())
     }
 }
 

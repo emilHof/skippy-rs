@@ -1,10 +1,9 @@
-use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
+use core::{borrow::Borrow, marker::Sync, sync::atomic::Ordering};
+use std::ptr::NonNull;
 
-use haphazard::raw::Reclaim;
+use haphazard::{raw::Reclaim, Global};
 
-use crate::internal::utils::{
-    skiplist_basics, GeneratesHeight, Levels, Node, SearchResult, HEIGHT,
-};
+use crate::internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT};
 
 skiplist_basics!(SkipList);
 
@@ -22,18 +21,25 @@ where
 
             match insertion_point {
                 SearchResult {
-                    target: Some(target),
+                    target: Some((target, hazard)),
                     ..
                 } => {
                     std::mem::swap(&mut (*target.as_ptr()).val, &mut val);
+                    drop(hazard);
                     Some(val)
                 }
-                SearchResult { prev, .. } => {
+                SearchResult {
+                    prev,
+                    level_hazards,
+                    ..
+                } => {
                     let new_node = Node::new_rand_height(key, val, self);
 
                     self.link_nodes(new_node, prev);
 
                     self.state.len.fetch_add(1, Ordering::Relaxed);
+
+                    drop(level_hazards);
 
                     None
                 }
@@ -43,11 +49,13 @@ where
 
     /// This function is unsafe, as it does not check whether new_node or link node are valid
     /// pointers.
-    /// To call this function safely:
-    /// - new_node cannot be null
-    /// - link_node cannot be null
-    /// - no pointer tower along the path can have a null pointer pointing backwards
-    /// - a tower of sufficient height must eventually be reached, the list head can be this tower
+    ///
+    /// # Safety
+    ///
+    /// 1. `new_node` cannot be null
+    /// 2. `link_node` cannot be null
+    /// 3. No pointer tower along the path can have a null pointer pointing backwards
+    /// 4. A tower of sufficient height must eventually be reached, the list head can be this tower
     unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
         // iterate over all the levels in the new nodes pointer tower
         for (i, levels) in prev.iter().enumerate().take((*new_node).height()) {
@@ -71,10 +79,20 @@ where
         unsafe {
             match self.find(key) {
                 SearchResult {
-                    target: Some(target),
+                    target: Some((target, hazard)),
                     prev,
+                    level_hazards,
                 } => {
                     let target = target.as_ptr();
+
+                    // Set the target state to being removed
+                    // If this errors, it is already being removed by someone else
+                    // and thus we exit early.
+                    if (*target).set_removed().is_err() {
+                        return None;
+                    }
+
+                    //
                     let key = core::ptr::read(&(*target).key);
                     let val = core::ptr::read(&(*target).val);
 
@@ -111,47 +129,85 @@ where
     }
 
     unsafe fn find<'a>(&'a self, key: &K) -> SearchResult<'a, K, V> {
-        let mut level = self.state.max_height.load(Ordering::Relaxed);
-        let head = unsafe { &(*self.head.as_ptr()) };
+        let mut level_hazards: haphazard::HazardPointerArray<'a, haphazard::Global, HEIGHT> =
+            haphazard::HazardPointer::many_in_domain(self.garbage.domain);
 
-        let mut prev = [&head.levels; HEIGHT];
+        let mut curr_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+        let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
 
-        // find the first and highest node tower
-        while level > 1 && head.levels[level - 1].load_ptr().is_null() {
-            level -= 1;
-        }
+        'search: loop {
+            let mut level = self.state.max_height.load(Ordering::Relaxed);
+            let head = unsafe { &(*self.head.as_ptr()) };
 
-        let mut curr = self.head.as_ptr().cast::<Node<K, V>>();
-        prev[level - 1] = &(*curr).levels;
+            let mut prev = [&head.levels; HEIGHT];
 
-        // steps:
-        // 1.
-        unsafe {
+            // find the first and highest node tower
+            while level > 1 && head.levels[level - 1].load_ptr().is_null() {
+                level -= 1;
+            }
+
+            // TODO this should be protected!!
+            let mut curr = self.head.as_ptr().cast::<Node<K, V>>();
+
+            // steps:
+            // 1. Go through each level until we reach a node with a key greater than ours
+            //     1.1 If
             while level > 0 {
-                if (*curr).levels[level - 1].load_ptr().is_null()
-                    || (*(*curr).levels[level - 1].load_ptr()).key >= *key
+                let next = unsafe { next_hazard.protect_ptr((*curr).levels[level - 1].as_std()) };
+                match next {
+                    Some((next, _))
+                        if unsafe {
+                            (*next.as_ptr()).key >= *key && !(*next.as_ptr()).removed()
+                        } =>
+                    {
+                        // TODO
+                        // we need to ensure that we are getting protected access to the levels
+                        level_hazards.as_refs()[level - 1]
+                            .protect_raw((curr as *const Node<K, V>).cast_mut());
+                        prev[level - 1] = &(*curr).levels;
+                        level -= 1;
+                    }
+                    None => {
+                        // Same as the previous match arm, yet I am struggling to find a way of
+                        // combining them efficiently
+                        // TODO Improve matching
+                        level_hazards.as_refs()[level - 1]
+                            .protect_raw((curr as *const Node<K, V>).cast_mut());
+                        prev[level - 1] = &(*curr).levels;
+                        level -= 1;
+                    }
+                    Some((next, _)) => {
+                        // Otherwise, it is either smaller, or being removed.
+                        // Either way, we protect move to this next node.
+                        curr = next.as_ptr();
+                        curr_hazard.protect_raw((curr as *const Node<K, V>).cast_mut());
+
+                        // Reset protection for the next pointer
+                        next_hazard.reset_protection();
+                    }
+                };
+            }
+
+            return match next_hazard.protect_ptr((*curr).levels[level].as_std()) {
+                Some((next, _))
+                    if unsafe { (*next.as_ptr()).key == *key && !(*next.as_ptr()).removed() } =>
                 {
-                    prev[level - 1] = &(*curr).levels;
-                    level -= 1;
-                } else {
-                    curr = (*curr).levels[level - 1].load_ptr()
+                    SearchResult {
+                        prev,
+                        level_hazards,
+                        target: Some((next, next_hazard)),
+                    }
                 }
-            }
-        }
-
-        let next = (*curr).levels[level].load_ptr();
-
-        if !next.is_null() && &(*next).key == key {
-            SearchResult {
-                prev,
-                target: unsafe { Some(NonNull::new_unchecked(next)) },
-            }
-        } else {
-            SearchResult { prev, target: None }
+                _ => SearchResult {
+                    prev,
+                    level_hazards,
+                    target: None,
+                },
+            };
         }
     }
 
-    pub fn get<'a>(&self, key: &K) -> Option<Entry<'a, K, V>> {
+    pub fn get<'a>(&'a self, key: &K) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
@@ -160,11 +216,9 @@ where
         unsafe {
             match self.find(key) {
                 SearchResult {
-                    target: Some(ptr), ..
-                } => Some(Entry {
-                    key: &ptr.as_ref().key,
-                    val: &ptr.as_ref().val,
-                }),
+                    target: Some((node, hazard)),
+                    ..
+                } => Some(Entry { node, hazard }),
                 _ => None,
             }
         }
@@ -174,48 +228,70 @@ where
         std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
-    pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
+    pub fn get_first<'a>(&'a self) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
 
-        let first = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
+        let mut hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+        let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+        let mut curr = unsafe {
+            hazard
+                .protect_ptr((*self.head.as_ptr()).levels[0].as_std())?
+                .0
+                .as_ptr()
+        };
 
-        unsafe {
-            if !first.is_null() {
-                let first = &(*first);
-                return Some(Entry {
-                    key: &first.key,
-                    val: &first.val,
-                });
+        while let Some((next, _)) = unsafe { next_hazard.protect_ptr((*curr).levels[0].as_std()) } {
+            curr = next.as_ptr();
+            hazard.protect_raw(curr);
+            if unsafe { !(*curr).removed() } {
+                unsafe {
+                    return Some(Entry {
+                        node: NonNull::new_unchecked(curr),
+                        hazard,
+                    });
+                }
             }
         }
 
         None
     }
 
-    pub fn get_last<'a>(&self) -> Option<Entry<'a, K, V>> {
+    pub fn get_last<'a>(&'a self) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
 
-        let curr = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
+        'last: loop {
+            let mut hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+            let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+            let mut curr = unsafe {
+                hazard
+                    .protect_ptr((*self.head.as_ptr()).levels[0].as_std())?
+                    .0
+                    .as_ptr()
+            };
 
-        unsafe {
-            if curr.is_null() {
-                return None;
+            while let Some((next, _)) =
+                unsafe { next_hazard.protect_ptr((*curr).levels[0].as_std()) }
+            {
+                curr = next.as_ptr();
+                hazard.protect_raw(curr);
             }
 
-            let mut curr = &(*curr);
-
-            while !curr.levels[0].load_ptr().is_null() {
-                curr = &(*curr.levels[0].load_ptr());
+            if unsafe { (*curr).removed() } {
+                hazard.reset_protection();
+                next_hazard.reset_protection();
+                continue 'last;
             }
 
-            Some(Entry {
-                key: &curr.key,
-                val: &curr.val,
-            })
+            unsafe {
+                return Some(Entry {
+                    node: NonNull::new_unchecked(curr),
+                    hazard,
+                });
+            }
         }
     }
 }
@@ -235,7 +311,7 @@ where
     K: Ord + Send + Sync,
     V: Send + Sync,
 {
-    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a;
+    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a, Self: 'a;
 
     fn new() -> Self {
         SkipList::new()
@@ -249,15 +325,15 @@ where
         self.remove(key)
     }
 
-    fn get<'a>(&self, key: &K) -> Option<Self::Entry<'a>> {
+    fn get<'a>(&'a self, key: &K) -> Option<Self::Entry<'a>> {
         self.get(key)
     }
 
-    fn last<'a>(&self) -> Option<Self::Entry<'a>> {
+    fn last<'a>(&'a self) -> Option<Self::Entry<'a>> {
         self.get_first()
     }
 
-    fn front<'a>(&self) -> Option<Self::Entry<'a>> {
+    fn front<'a>(&'a self) -> Option<Self::Entry<'a>> {
         self.get_last()
     }
 
@@ -266,20 +342,26 @@ where
     }
 }
 
-pub struct Entry<'a, K, V> {
-    key: &'a K,
-    val: &'a V,
+pub struct Entry<'a, K: 'a, V: 'a> {
+    node: core::ptr::NonNull<Node<K, V>>,
+    hazard: haphazard::HazardPointer<'a, Global>,
+}
+
+struct SearchResult<'a, K, V> {
+    prev: [&'a Levels<K, V>; HEIGHT],
+    level_hazards: haphazard::HazardPointerArray<'a, haphazard::Global, HEIGHT>,
+    target: Option<(NonNull<Node<K, V>>, haphazard::HazardPointer<'a, Global>)>,
 }
 
 impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
     fn borrow(&self) -> &K {
-        self.key
+        unsafe { &self.node.as_ref().key }
     }
 }
 
 impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
     fn as_ref(&self) -> &V {
-        self.val
+        unsafe { &self.node.as_ref().val }
     }
 }
 #[cfg(test)]

@@ -222,7 +222,7 @@ where
     K: Ord + Sync,
     V: Sync,
 {
-    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a;
+    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a, Self: 'a;
 
     fn new() -> Self {
         SkipList::new()
@@ -236,15 +236,15 @@ where
         self.remove(key)
     }
 
-    fn get<'a>(&self, key: &K) -> Option<Self::Entry<'a>> {
+    fn get<'a>(&'a self, key: &K) -> Option<Self::Entry<'a>> {
         self.get(key)
     }
 
-    fn last<'a>(&self) -> Option<Self::Entry<'a>> {
+    fn last<'a>(&'a self) -> Option<Self::Entry<'a>> {
         self.get_first()
     }
 
-    fn front<'a>(&self) -> Option<Self::Entry<'a>> {
+    fn front<'a>(&'a self) -> Option<Self::Entry<'a>> {
         self.get_last()
     }
 

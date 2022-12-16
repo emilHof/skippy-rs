@@ -145,6 +145,46 @@ fn get_skippy(b: &mut Bencher) {
 }
 
 #[bench]
+fn get_skippy_sync(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let list: skippy::internal::sync::SkipList<CountOnCmp<u16>, u8> =
+        skippy::internal::sync::SkipList::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..upper {
+        seed ^= seed << 6;
+        seed ^= seed >> 11;
+        seed ^= seed << 5;
+        list.insert(
+            CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            },
+            0,
+        );
+    }
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.get(&CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            });
+        }
+    });
+
+    println!(
+        "cmp count for get skippy_sync: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}
+
+#[bench]
 fn get_crossbeam(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
@@ -218,6 +258,46 @@ fn remove_skippy(b: &mut Bencher) {
 
     println!(
         "cmp count for remove skippy: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}
+
+#[bench]
+fn remove_skippy_sync(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let list: skippy::internal::sync::SkipList<CountOnCmp<u16>, u8> =
+        skippy::internal::sync::SkipList::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.insert(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                0,
+            );
+        }
+
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.remove(&CountOnCmp {
+                key: seed,
+                counter: counter.clone(),
+            });
+        }
+    });
+
+    println!(
+        "cmp count for remove skippy_sync: {}m",
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }

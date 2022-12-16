@@ -33,7 +33,7 @@ where
         self.queue.front()
     }
 
-    pub fn pop(&mut self) -> Option<V> {
+    pub fn pop(&'a mut self) -> Option<V> {
         match self.queue.front() {
             Some(e) => self.queue.remove(e.borrow()).map(|(v, _)| v),
             None => None,
