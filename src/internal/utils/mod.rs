@@ -87,10 +87,10 @@ macro_rules! skiplist_basics {
             K: core::marker::Sync,
             V: core::marker::Sync,
         {
-            head: core::ptr::NonNull<crate::internal::utils::Head<K, V>>,
-            state: crate::internal::utils::Padded<crate::internal::utils::ListState>,
+            pub(crate) head: core::ptr::NonNull<crate::internal::utils::Head<K, V>>,
+            pub(crate) state: crate::internal::utils::Padded<crate::internal::utils::ListState>,
             #[allow(dead_code)]
-            garbage: crate::internal::utils::Can<'domain>,
+            pub(crate) garbage: crate::internal::utils::Can<'domain>,
         }
 
         impl<'domain, K, V> $my_list<'domain, K, V>
