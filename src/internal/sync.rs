@@ -306,6 +306,20 @@ where
     }
 }
 
+unsafe impl<'domain, K, V> Send for SkipList<'domain, K, V>
+where
+    K: Send + Sync,
+    V: Send + Sync,
+{
+}
+
+unsafe impl<'domain, K, V> Sync for SkipList<'domain, K, V>
+where
+    K: Send + Sync,
+    V: Send + Sync,
+{
+}
+
 impl<'domain, K, V> crate::skiplist::SkipList<K, V> for SkipList<'domain, K, V>
 where
     K: Ord + Send + Sync,
@@ -339,6 +353,19 @@ where
 
     fn len(&self) -> usize {
         self.len()
+    }
+}
+
+// TODO Make sure this is sound!
+impl<'domain, K, V> From<super::skiplist::SkipList<'domain, K, V>> for SkipList<'domain, K, V>
+where
+    K: Sync,
+    V: Sync,
+{
+    fn from(list: super::skiplist::SkipList<'domain, K, V>) -> Self {
+        let new = unsafe { core::ptr::read(&list as *const _ as *const Self) };
+        core::mem::forget(list);
+        new
     }
 }
 
