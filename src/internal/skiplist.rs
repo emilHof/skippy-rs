@@ -1,7 +1,8 @@
 use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
 
-use crate::internal::utils::{
-    skiplist_basics, GeneratesHeight, Levels, Node, SearchResult, HEIGHT,
+use crate::{
+    internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
+    skiplist,
 };
 
 skiplist_basics!(SkipList);
@@ -217,12 +218,12 @@ where
     }
 }
 
-impl<'domain, K, V> crate::skiplist::SkipList<K, V> for SkipList<'domain, K, V>
+impl<'domain, K, V> skiplist::SkipList<K, V> for SkipList<'domain, K, V>
 where
     K: Ord + Sync,
     V: Sync,
 {
-    type Entry<'a> = Entry<'a, K, V> where K: 'a, V: 'a, Self: 'a;
+    type Entry<'a> = Entry<'a, K, V> where  Self: 'a;
 
     fn new() -> Self {
         SkipList::new()
@@ -258,6 +259,16 @@ pub struct Entry<'a, K, V> {
     val: &'a V,
 }
 
+impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
+    fn val(&self) -> &V {
+        &self.val
+    }
+
+    fn key(&self) -> &K {
+        &self.key
+    }
+}
+
 impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
     fn borrow(&self) -> &K {
         self.key
@@ -269,6 +280,12 @@ impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
         self.val
     }
 }
+
+struct SearchResult<'a, K, V> {
+    prev: [&'a Levels<K, V>; HEIGHT],
+    target: Option<NonNull<Node<K, V>>>,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

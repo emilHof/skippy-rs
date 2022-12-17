@@ -1,8 +1,6 @@
 pub trait SkipList<K, V> {
-    type Entry<'a>
+    type Entry<'a>: Entry<'a, K, V>
     where
-        K: 'a,
-        V: 'a,
         Self: 'a;
 
     fn new() -> Self;
@@ -22,4 +20,9 @@ pub trait SkipList<K, V> {
     fn is_empty(&self) -> bool {
         self.len() < 1
     }
+}
+
+pub trait Entry<'a, K, V> {
+    fn val(&self) -> &V;
+    fn key(&self) -> &K;
 }

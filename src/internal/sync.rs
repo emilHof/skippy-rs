@@ -3,7 +3,10 @@ use std::ptr::NonNull;
 
 use haphazard::{raw::Reclaim, Global};
 
-use crate::internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT};
+use crate::{
+    internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
+    skiplist,
+};
 
 skiplist_basics!(SkipList);
 
@@ -320,7 +323,7 @@ where
 {
 }
 
-impl<'domain, K, V> crate::skiplist::SkipList<K, V> for SkipList<'domain, K, V>
+impl<'domain, K, V> skiplist::SkipList<K, V> for SkipList<'domain, K, V>
 where
     K: Ord + Send + Sync,
     V: Send + Sync,
@@ -374,6 +377,22 @@ pub struct Entry<'a, K: 'a, V: 'a> {
     hazard: haphazard::HazardPointer<'a, Global>,
 }
 
+impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
+    fn val(&self) -> &V {
+        // #Safety
+        //
+        // Our `HazardPointer` ensures that our pointers is valid.
+        unsafe { &self.node.as_ref().val }
+    }
+
+    fn key(&self) -> &K {
+        // #Safety
+        //
+        // Our `HazardPointer` ensures that our pointers is valid.
+        unsafe { &self.node.as_ref().key }
+    }
+}
+
 struct SearchResult<'a, K, V> {
     prev: [&'a Levels<K, V>; HEIGHT],
     level_hazards: haphazard::HazardPointerArray<'a, haphazard::Global, HEIGHT>,
@@ -396,7 +415,7 @@ mod sync_test {
     use super::*;
 
     #[test]
-    fn test_new_node() {
+    fn test_new_node_sync() {
         let node = Node::new(100, "hello", 1);
         let other = Node::new(100, "hello", 1);
         unsafe { println!("node 1: {:?},", *node) };
@@ -414,12 +433,12 @@ mod sync_test {
     }
 
     #[test]
-    fn test_new_list() {
+    fn test_new_list_sync() {
         let _: SkipList<'_, usize, usize> = SkipList::new();
     }
 
     #[test]
-    fn test_insert() {
+    fn test_insert_sync() {
         let list = SkipList::new();
         let mut rng: u16 = rand::random();
 
@@ -432,7 +451,7 @@ mod sync_test {
     }
 
     #[test]
-    fn test_rand_height() {
+    fn test_rand_height_sync() {
         let mut list: SkipList<'_, i32, i32> = SkipList::new();
         let node = Node::new_rand_height("Hello", "There!", &mut list);
 
@@ -451,7 +470,7 @@ mod sync_test {
     }
 
     #[test]
-    fn test_insert_verbose() {
+    fn test_insert_verbose_sync() {
         let list = SkipList::new();
 
         list.insert(1, 1);
