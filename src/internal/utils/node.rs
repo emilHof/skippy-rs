@@ -162,6 +162,24 @@ impl<K, V> Node<K, V> {
             )
             .map_err(|_| ())
     }
+    pub(crate) fn set_height(&self, height: usize) {
+        assert!(height <= self.height());
+
+        let old_height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
+
+        let new_height_and_removed = (old_height_and_removed & REMOVED_MASK) | height as u32;
+
+        while let Err(other) = self.height_and_removed.compare_exchange(
+            old_height_and_removed,
+            new_height_and_removed,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            if (other << 1 >> 1) <= height as u32 {
+                break;
+            }
+        }
+    }
 }
 
 impl<K, V> PartialEq for Node<K, V>
@@ -180,16 +198,17 @@ where
     V: Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Node {{ key:  {:?}, val: {:?}, height: {}, levels: [{}]}}",
-            self.key,
-            self.val,
-            self.height(),
-            (0..self.height()).fold(String::new(), |acc, level| {
-                format!("{}{:?}, ", acc, self.levels[level])
-            })
-        )
+        f.debug_struct("Node")
+            .field("key", &self.key)
+            .field("val", &self.val)
+            .field("height", &self.height())
+            .field(
+                "levels",
+                &(0..self.height()).fold(String::new(), |acc, level| {
+                    format!("{}{:?}, ", acc, self.levels[level])
+                }),
+            )
+            .finish()
     }
 }
 
