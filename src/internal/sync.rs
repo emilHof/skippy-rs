@@ -1,7 +1,7 @@
-use core::{borrow::Borrow, marker::Sync, sync::atomic::Ordering};
+use core::{borrow::Borrow, fmt::Debug, marker::Sync, sync::atomic::Ordering};
 use std::ptr::NonNull;
 
-use haphazard::{raw::Reclaim, Global};
+use haphazard::{raw::Reclaim, Global, HazardPointer, HazardPointerArray};
 
 use crate::{
     internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
@@ -20,7 +20,7 @@ where
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         unsafe {
-            let insertion_point = self.find(&key);
+            let insertion_point = self.find(&key, false);
 
             match insertion_point {
                 SearchResult {
@@ -70,6 +70,7 @@ where
         }
     }
 
+    #[allow(unused_assignments)]
     pub fn remove(&self, key: &K) -> Option<(K, V)>
     where
         K: Send,
@@ -80,13 +81,13 @@ where
         }
 
         unsafe {
-            match self.find(key) {
+            match self.find(key, false) {
                 SearchResult {
-                    target: Some((target, hazard)),
-                    prev,
-                    level_hazards,
+                    target: Some((target, mut hazard)),
+                    mut prev,
+                    mut level_hazards,
                 } => {
-                    let target = target.as_ptr();
+                    let mut target = target.as_ptr();
 
                     // Set the target state to being removed
                     // If this errors, it is already being removed by someone else
@@ -99,12 +100,26 @@ where
                     let key = core::ptr::read(&(*target).key);
                     let val = core::ptr::read(&(*target).val);
 
-                    self.unlink(target, prev);
-                    self.garbage
-                        .domain
-                        .retire_ptr_with(target, |ptr: *mut dyn Reclaim| {
-                            Node::<K, V>::dealloc(ptr as *mut Node<K, V>)
-                        });
+                    while let Err(_) = self.unlink(target, prev) {
+                        (target, prev, hazard, level_hazards) = {
+                            if let SearchResult {
+                                target: Some((target, hazard)),
+                                prev,
+                                level_hazards,
+                            } = self.find(&key, true)
+                            {
+                                (target.as_ptr(), prev, hazard, level_hazards)
+                            } else {
+                                break;
+                            }
+                        };
+                    }
+
+                    // TODO Ensure the safety of this!
+                    // #Safety:
+                    //
+                    // we are the only thread that has permission to drop this node.
+                    self.retire_node(target);
 
                     // We see if we can drop some pointers in the list.
                     self.garbage.domain.eager_reclaim();
@@ -119,52 +134,84 @@ where
     }
 
     /// Logically removes the node from the list by linking its adjacent nodes to one-another.
-    fn unlink(&self, node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
+    fn unlink(&self, node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) -> Result<(), ()> {
         // safety check against UB caused by unlinking the head
         if self.is_head(node) {
             panic!()
         }
         unsafe {
-            for (i, levels) in prev.iter().enumerate().take((*node).height()) {
-                levels[i].store_ptr((*node).levels[i].load_ptr());
+            for (i, levels) in prev.iter().enumerate().take((*node).height()).rev() {
+                let new_next = (*node).levels[i].as_std().load(Ordering::Acquire);
+
+                // Performs a compare_exchange, expecting the old value to point to the current
+                // node. If it does not, we cannot make any reasonable progress, so we search
+                // again.
+                if let Err(_) = levels[i].as_std().compare_exchange(
+                    node,
+                    new_next,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    (*node).set_height(i + 1);
+                    return Err(());
+                }
             }
+        }
+
+        Ok(())
+    }
+
+    fn retire_node(&self, node_ptr: *mut Node<K, V>) {
+        unsafe {
+            self.garbage
+                .domain
+                .retire_ptr_with(node_ptr, |ptr: *mut dyn Reclaim| {
+                    Node::<K, V>::dealloc(ptr as *mut Node<K, V>)
+                });
         }
     }
 
-    unsafe fn find<'a>(&'a self, key: &K) -> SearchResult<'a, K, V> {
-        let mut level_hazards: haphazard::HazardPointerArray<'a, haphazard::Global, HEIGHT> =
-            haphazard::HazardPointer::many_in_domain(self.garbage.domain);
+    unsafe fn find<'a>(&'a self, key: &K, allow_removed: bool) -> SearchResult<'a, K, V> {
+        let mut level_hazards: HazardPointerArray<'a, Global, HEIGHT> =
+            HazardPointer::many_in_domain(self.garbage.domain);
 
-        let mut curr_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
-        let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+        let mut curr_hazard = HazardPointer::new_in_domain(self.garbage.domain);
+        let mut next_hazard = HazardPointer::new_in_domain(self.garbage.domain);
 
-        'search: loop {
-            let mut level = self.state.max_height.load(Ordering::Relaxed);
-            let head = unsafe { &(*self.head.as_ptr()) };
+        let mut level = self.state.max_height.load(Ordering::Relaxed);
+        let head = unsafe { &(*self.head.as_ptr()) };
 
-            let mut prev = [&head.levels; HEIGHT];
+        let mut prev = [&head.levels; HEIGHT];
 
-            // find the first and highest node tower
-            while level > 1 && head.levels[level - 1].load_ptr().is_null() {
-                level -= 1;
-            }
+        // Find the first and highest node tower
+        while level > 1 && head.levels[level - 1].load_ptr().is_null() {
+            level -= 1;
+        }
 
-            // TODO this should be protected!!
-            let mut curr = self.head.as_ptr().cast::<Node<K, V>>();
+        // We need not protect the head, as it will always be valid, as long as we are in a sane
+        // state.
+        let mut curr = self.head.as_ptr().cast::<Node<K, V>>();
 
-            // steps:
-            // 1. Go through each level until we reach a node with a key greater than ours
-            //     1.1 If
-            while level > 0 {
-                let next = unsafe { next_hazard.protect_ptr((*curr).levels[level - 1].as_std()) };
-                match next {
+        // steps:
+        // 1. Go through each level until we reach a node with a key GEQ to ours or that is null
+        //     1.1 If we are equal, then the node must either be marked as removed or removed nodes
+        //       are allowed in this search.
+        //       Should this be the case, then we drop down a level while also protecting a pointer
+        //       to the current node, in order to keep the `Level` valid in our `prev` array.
+        //     1.2 If we the `next` node is less or equal but removed and removed nodes are
+        //       disallowed, then we set our current node to the next node.
+        //
+        while level > 0 {
+            let next = unsafe { next_hazard.protect_ptr((*curr).levels[level - 1].as_std()) };
+            unsafe {  
+            match next {
                     Some((next, _))
-                        if unsafe {
-                            (*next.as_ptr()).key >= *key && !(*next.as_ptr()).removed()
-                        } =>
-                    {
-                        // TODO
-                        // we need to ensure that we are getting protected access to the levels
+                        // This check should ensure that we always get a non-removed node, if there
+                        // is one, of our target key, as long as allow removed is set to false.
+                        if (*next.as_ptr()).key >= *key
+                                && ((*next.as_ptr()).key != *key    
+                                || !(*next.as_ptr()).removed()  
+                                || allow_removed) => {
                         level_hazards.as_refs()[level - 1]
                             .protect_raw((curr as *const Node<K, V>).cast_mut());
                         prev[level - 1] = &(*curr).levels;
@@ -184,30 +231,29 @@ where
                         // Either way, we protect move to this next node.
                         curr = next.as_ptr();
                         curr_hazard.protect_raw((curr as *const Node<K, V>).cast_mut());
-
-                        // Reset protection for the next pointer
-                        next_hazard.reset_protection();
                     }
                 };
-            }
+            
+        }}
 
-            return match next_hazard.protect_ptr((*curr).levels[level].as_std()) {
-                Some((next, _))
-                    if unsafe { (*next.as_ptr()).key == *key && !(*next.as_ptr()).removed() } =>
-                {
-                    SearchResult {
-                        prev,
-                        level_hazards,
-                        target: Some((next, next_hazard)),
-                    }
-                }
-                _ => SearchResult {
+        return match next_hazard.protect_ptr((*curr).levels[level].as_std()) {
+            Some((next, _))
+                if unsafe {
+                    (*next.as_ptr()).key == *key && (allow_removed || !(*next.as_ptr()).removed())
+                } =>
+            {
+                SearchResult {
                     prev,
                     level_hazards,
-                    target: None,
-                },
-            };
-        }
+                    target: Some((next, next_hazard)),
+                }
+            }
+            _ => SearchResult {
+                prev,
+                level_hazards,
+                target: None,
+            },
+        };
     }
 
     pub fn get<'a>(&'a self, key: &K) -> Option<Entry<'a, K, V>> {
@@ -217,7 +263,7 @@ where
 
         // Perform safety check for whether we are dealing with the head.
         unsafe {
-            match self.find(key) {
+            match self.find(key, false) {
                 SearchResult {
                     target: Some((node, hazard)),
                     ..
@@ -236,8 +282,8 @@ where
             return None;
         }
 
-        let mut hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
-        let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
+        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
+        let mut next_hazard = HazardPointer::new_in_domain(self.garbage.domain);
         let mut curr = unsafe {
             hazard
                 .protect_ptr((*self.head.as_ptr()).levels[0].as_std())?
@@ -399,6 +445,20 @@ struct SearchResult<'a, K, V> {
     target: Option<(NonNull<Node<K, V>>, haphazard::HazardPointer<'a, Global>)>,
 }
 
+impl<'a, K, V> Debug for SearchResult<'a, K, V>
+where
+    K: Debug + Default,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe {
+            f.debug_struct("SearchResult")
+                .field("target", &self.target.as_ref().map(|t| t.0.as_ref()))
+                .finish()
+        }
+    }
+}
+
 impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
     fn borrow(&self) -> &K {
         unsafe { &self.node.as_ref().key }
@@ -412,6 +472,8 @@ impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
 }
 #[cfg(test)]
 mod sync_test {
+    use rand::Rng;
+
     use super::*;
 
     #[test]
@@ -648,5 +710,94 @@ mod sync_test {
         }
 
         assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_find_removed() {
+        let list = SkipList::new();
+
+        list.insert(3, ());
+
+        list.insert(4, ());
+
+        list.insert(5, ());
+
+        unsafe {
+            assert!(list.find(&3, false).target.is_some());
+            assert!(list.find(&4, false).target.is_some());
+        }
+
+        // manually get reference to the nodes
+        let node_3 = unsafe { &mut (*(*list.head.as_ptr()).levels[0].load_ptr()) };
+        let node_4 =
+            unsafe { &mut (*(*(*list.head.as_ptr()).levels[0].load_ptr()).levels[0].load_ptr()) };
+        let node_5 = unsafe {
+            &mut (*(*(*(*list.head.as_ptr()).levels[0].load_ptr()).levels[0].load_ptr()).levels[0]
+                .load_ptr())
+        };
+
+        // make sure it is the right node
+        assert_eq!(node_3.key, 3);
+        println!("{:?}", node_3);
+        assert_eq!(node_4.key, 4);
+        println!("{:?}", node_4);
+        assert_eq!(node_5.key, 5);
+        println!("{:?}", node_5);
+
+        // remove the node logically
+        node_4.set_removed();
+
+        unsafe {
+            assert!(list.find(&4, false).target.is_none());
+
+            assert!(list.find(&4, true).target.is_some());
+
+            println!("{:?}", list.find(&3, false));
+        }
+
+        assert!(!node_3.removed());
+
+        assert!(list.remove(&4).is_none());
+
+        // remove the node logically
+        node_4.height_and_removed.store(
+            node_4.height_and_removed.load(Ordering::SeqCst) ^ (1 as u32) << 31,
+            Ordering::SeqCst,
+        );
+
+        assert!(!node_4.removed());
+
+        assert!(list.remove(&4).is_some());
+    }
+
+    #[test]
+    fn test_sync_remove() {
+        use std::sync::Arc;
+        let list = Arc::new(SkipList::new());
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..1_000 {
+            list.insert(rng.gen::<u8>(), ());
+        }
+
+        (0..10).map(|_| {
+            let list = list.clone();
+            std::thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                for _ in 0..10 {
+                    let target = &rng.gen::<u8>();
+                    println!("removing {}, successfully: {}", target, list.remove(&target).is_some());
+                }
+            })
+        }).for_each(|handle| handle.join().unwrap());
+
+
+        unsafe {
+            let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
+            while !node.is_null() {
+                println!("{:?}", *node);
+                node = (*node).levels[0].load_ptr();
+            }
+        }
     }
 }
