@@ -162,6 +162,7 @@ impl<K, V> Node<K, V> {
             )
             .map_err(|_| ())
     }
+
     pub(crate) fn set_height(&self, height: usize) {
         assert!(height <= self.height());
 
@@ -225,5 +226,31 @@ where
                 self.key, self.val, level,
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod node_test {
+    use super::*;
+
+    #[test]
+    fn test_set_height() {
+        let node = unsafe { &mut (*Node::new(3, (), 5)) };
+
+        assert_eq!(node.height(), 5);
+
+        assert!(!node.removed());
+
+        assert!(node.set_removed().is_ok());
+
+        assert!(node.removed());
+
+        assert_eq!(node.height(), 5);
+
+        node.set_height(3);
+
+        assert_eq!(node.height(), 3);
+
+        assert!(node.removed());
     }
 }
