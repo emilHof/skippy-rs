@@ -780,16 +780,20 @@ mod sync_test {
             list.insert(rng.gen::<u8>(), ());
         }
 
-        (0..10).map(|_| {
+        let threads = (0..10).map(|t| {
             let list = list.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::thread_rng();
-                for _ in 0..10 {
+                for _ in 0..50 {
                     let target = &rng.gen::<u8>();
-                    println!("removing {}, successfully: {}", target, list.remove(&target).is_some());
+                    println!("removing {} from t:{}, successfully: {}", target, t, list.remove(&target).is_some());
                 }
             })
-        }).for_each(|handle| handle.join().unwrap());
+        }).collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap()
+        }
 
 
         unsafe {
