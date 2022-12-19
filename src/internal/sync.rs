@@ -37,16 +37,24 @@ where
                     ..
                 } => {
                     let new_node = Node::new_rand_height(key, val, self);
-                    println!("have new node: {:?}", *(new_node as *mut Node<u8, ()>));
-
-                    // (*new_node).set_removed().expect("new node to not be remove");
 
                     let mut starting_height = 0;
 
                     while let Err(starting) = self.link_nodes(new_node, prev, starting_height) {
+                        // println!("error, retrying...");
                         // println!("failed to build full height {:?} at height: {}", new_node, starting + 1);
                         (prev, starting_height, level_hazards) = {
-                            let SearchResult { prev, level_hazards, target: _ } = self.find(&(*new_node).key, false);
+                            let SearchResult { prev, level_hazards, target } = self.find(&(*new_node).key, false);
+                            if let Some(target) = target {
+                                if starting == 0 {
+                                    std::mem::swap(&mut (*target.0.as_ptr()).val, &mut (*new_node).val);
+
+                                    self.retire_node(new_node);
+
+                                    return None;
+                                }
+                                // println!("node already exists! t: {:?}, new: {:?}", target.0, new_node);
+                            }
                             (prev, starting, level_hazards)
                         };
                     };
@@ -70,25 +78,28 @@ where
     /// 2. `link_node` cannot be null
     /// 3. No pointer tower along the path can have a null pointer pointing backwards
     /// 4. A tower of sufficient height must eventually be reached, the list head can be this tower
-    unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, previous_nodes: [NonNull<Node<K, V>>; HEIGHT], start_height: usize) -> Result<(), usize> {
-        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
-
+    unsafe fn link_nodes(
+        &self, 
+        new_node: *mut Node<K, V>, 
+        previous_nodes: [(NonNull<Node<K, V>>, *mut Node<K, V>); HEIGHT], 
+        start_height: usize
+    ) 
+        -> Result<(), usize> 
+    {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..(*new_node).height() {
-            let next = hazard.protect_ptr(previous_nodes[i].as_ref().levels[i].as_std()).map_or(core::ptr::null_mut(), |node| node.0.as_ptr());
-
+            let (prev, next) = previous_nodes[i];
             if !next.is_null() && (*next).key <= (*new_node).key {
                 return Err(i);
             }
 
-            println!("linking to head? {}", self.is_head(previous_nodes[i].as_ptr()));
-
-            if let Err(_) = previous_nodes[i].as_ref().levels[i].as_std().compare_exchange(
+            if let Err(_) = prev.as_ref().levels[i].as_std().compare_exchange(
                 next, 
                 new_node, 
                 Ordering::SeqCst, 
                 Ordering::SeqCst
             ) {
+                // println!("failed to swap!");
                 return Err(i)
             }
 
@@ -175,7 +186,7 @@ where
         &self, 
         node: *mut Node<K, V>, 
         height: usize,
-        previous_nodes: [NonNull<Node<K, V>>; HEIGHT], 
+        previous_nodes: [(NonNull<Node<K, V>>, *mut Node<K, V>); HEIGHT], 
         level_hazards: HazardPointerArray<'domain, Global, HEIGHT>
     ) -> Result<(), usize> 
     {
@@ -184,7 +195,7 @@ where
             panic!()
         }
         unsafe {
-            for (i, prev) in previous_nodes.iter().enumerate().take(height).rev() {
+            for (i, (prev, _)) in previous_nodes.iter().enumerate().take(height).rev() {
                 let new_next = (*node).levels[i].as_std().load(Ordering::SeqCst);
 
                 // Performs a compare_exchange, expecting the old value to point to the current
@@ -235,7 +246,14 @@ where
         let mut level = self.state.max_height.load(Ordering::Relaxed);
         let head = unsafe { &(*self.head.as_ptr()) };
 
-        let mut prev = [self.head.cast::<Node<K,V>>(); HEIGHT];
+        let mut prev = [(self.head.cast::<Node<K,V>>(), core::ptr::null_mut()); HEIGHT];
+
+        unsafe {
+            for i in 0..HEIGHT {
+                prev[i].1 = self.head.as_ref().levels[i].load_ptr();
+            }
+        }
+
 
 
         'search: loop {
@@ -285,7 +303,7 @@ where
                             curr_hazard.protect_raw((curr as *const Node<K, V>).cast_mut());
                         },
                         _ => {
-                            prev[level - 1] = NonNull::new_unchecked(curr);
+                            prev[level - 1] = (NonNull::new_unchecked(curr), (*curr).levels[level - 1].load_ptr());
                             level_hazards.as_refs()[level - 1]
                                 .protect_raw((curr as *const Node<K, V>).cast_mut());
                             level -= 1;
@@ -505,7 +523,7 @@ impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
 }
 
 struct SearchResult<'a, K, V> {
-    prev: [NonNull<Node<K, V>>; HEIGHT],
+    prev: [(NonNull<Node<K, V>>, *mut Node<K, V>); HEIGHT],
     level_hazards: haphazard::HazardPointerArray<'a, haphazard::Global, HEIGHT>,
     target: Option<(NonNull<Node<K, V>>, haphazard::HazardPointer<'a, Global>)>,
 }
@@ -844,8 +862,6 @@ mod sync_test {
         for _ in 0..1_000 {
             list.insert(rng.gen::<u8>(), ());
         };
-        // println!("all insertions done");
-
         let threads = (0..30).map(|t| {
             let list = list.clone();
             std::thread::spawn(move || {
@@ -854,14 +870,12 @@ mod sync_test {
                     let target = &rng.gen::<u8>();
                     list.remove(&target);
                 }
-                // println!("t{} is done", t);
             })
         }).collect::<Vec<_>>();
 
         for thread in threads {
             thread.join().unwrap()
         }
-        // println!("all threads are done");
 
         unsafe {
             let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
@@ -877,16 +891,16 @@ mod sync_test {
         use std::sync::Arc;
         let list = Arc::new(SkipList::new());
 
-        let threads = (0..5).map(|_| {
+        let threads = (0..30).map(|_| {
             let list = list.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::thread_rng();
-                for _ in 0..100 {
+                for _ in 0..10_000 {
                     let target = rng.gen::<u8>();
                     if rng.gen::<u8>() % 5 == 0 {
                         list.remove(&target);
                     } else {
-                        println!("inserting: {}, replacing a value? {}", target, list.insert(target, ()).is_some());
+                        list.insert(target, ());
                     }
                 }
             })
@@ -898,10 +912,9 @@ mod sync_test {
 
 
         unsafe {
-            println!("first: {:?}", list.head.as_ref().levels[0].load_ptr());
             let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
             while !node.is_null() {
-                println!("{:?} - {:?}", node, *node);
+                // println!("{:?} - {:?}", node, *node);
                 node = (*node).levels[0].load_ptr();
             }
         }
