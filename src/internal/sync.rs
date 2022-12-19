@@ -32,13 +32,24 @@ where
                     Some(val)
                 }
                 SearchResult {
-                    prev,
-                    level_hazards,
+                    mut prev,
+                    mut level_hazards,
                     ..
                 } => {
                     let new_node = Node::new_rand_height(key, val, self);
+                    println!("have new node: {:?}", *(new_node as *mut Node<u8, ()>));
 
-                    self.link_nodes(new_node, prev);
+                    // (*new_node).set_removed().expect("new node to not be remove");
+
+                    let mut starting_height = 0;
+
+                    while let Err(starting) = self.link_nodes(new_node, prev, starting_height) {
+                        // println!("failed to build full height {:?} at height: {}", new_node, starting + 1);
+                        (prev, starting_height, level_hazards) = {
+                            let SearchResult { prev, level_hazards, target: _ } = self.find(&(*new_node).key, false);
+                            (prev, starting, level_hazards)
+                        };
+                    };
 
                     self.state.len.fetch_add(1, Ordering::Relaxed);
 
@@ -59,15 +70,38 @@ where
     /// 2. `link_node` cannot be null
     /// 3. No pointer tower along the path can have a null pointer pointing backwards
     /// 4. A tower of sufficient height must eventually be reached, the list head can be this tower
-    unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, previous_nodes: [NonNull<Node<K, V>>; HEIGHT]) {
+    unsafe fn link_nodes(&self, new_node: *mut Node<K, V>, previous_nodes: [NonNull<Node<K, V>>; HEIGHT], start_height: usize) -> Result<(), usize> {
+        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
+
         // iterate over all the levels in the new nodes pointer tower
-        for (i, prev) in previous_nodes.iter().enumerate().take((*new_node).height()) {
-            // move backwards until a pointer tower of sufficient hight is reached
-            unsafe {
-                (*new_node).levels[i].store_ptr(prev.as_ref().levels[i].load_ptr());
-                prev.as_ref().levels[i].store_ptr(new_node);
+        for i in start_height..(*new_node).height() {
+            let next = hazard.protect_ptr(previous_nodes[i].as_ref().levels[i].as_std()).map_or(core::ptr::null_mut(), |node| node.0.as_ptr());
+
+            if !next.is_null() && (*next).key <= (*new_node).key {
+                return Err(i);
             }
+
+            println!("linking to head? {}", self.is_head(previous_nodes[i].as_ptr()));
+
+            if let Err(_) = previous_nodes[i].as_ref().levels[i].as_std().compare_exchange(
+                next, 
+                new_node, 
+                Ordering::SeqCst, 
+                Ordering::SeqCst
+            ) {
+                return Err(i)
+            }
+
+            if let Err(_) = (*new_node).levels[i].as_std().compare_exchange(
+                core::ptr::null_mut(), 
+                next,
+                Ordering::SeqCst, 
+                Ordering::SeqCst
+            ) {
+                return Err(i);
+            };
         }
+        Ok(())
     }
 
     #[allow(unused_assignments)]
@@ -166,8 +200,11 @@ where
                     return Err(i+1);
                 }
 
+                // We check if the previous node is being removed after we have already relinked
+                // it, as the prev nodes expects us to do this.
+                // We still need to stop the unlink here, as we will have to relink to the actual,
+                // lively previous node at this level as well.
                 if prev.as_ref().removed() {
-                    // println!("{:?} is removed", prev.0);
                     return Err(i+1);
                 }
 
@@ -809,13 +846,13 @@ mod sync_test {
         };
         // println!("all insertions done");
 
-        let threads = (0..10).map(|t| {
+        let threads = (0..30).map(|t| {
             let list = list.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::thread_rng();
-                for _ in 0..100 {
+                for _ in 0..10_000 {
                     let target = &rng.gen::<u8>();
-                    // println!("removing {} from t:{}, successfully: {}", target, t, list.remove(&target).is_some());
+                    list.remove(&target);
                 }
                 // println!("t{} is done", t);
             })
@@ -830,6 +867,41 @@ mod sync_test {
             let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
             while !node.is_null() {
                 // println!("{:?}", *node);
+                node = (*node).levels[0].load_ptr();
+            }
+        }
+    }
+
+    #[test]
+    fn test_sync_insert() {
+        use std::sync::Arc;
+        let list = Arc::new(SkipList::new());
+
+        let threads = (0..5).map(|_| {
+            let list = list.clone();
+            std::thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                for _ in 0..100 {
+                    let target = rng.gen::<u8>();
+                    if rng.gen::<u8>() % 5 == 0 {
+                        list.remove(&target);
+                    } else {
+                        println!("inserting: {}, replacing a value? {}", target, list.insert(target, ()).is_some());
+                    }
+                }
+            })
+        }).collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap()
+        }
+
+
+        unsafe {
+            println!("first: {:?}", list.head.as_ref().levels[0].load_ptr());
+            let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
+            while !node.is_null() {
+                println!("{:?} - {:?}", node, *node);
                 node = (*node).levels[0].load_ptr();
             }
         }
