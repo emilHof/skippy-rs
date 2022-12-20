@@ -95,10 +95,9 @@ where
             let (prev, next) = previous_nodes[i];
 
             // we check if the next node is actually lower in key than our current node.
-            if (*new_node).removed() || (!(*new_node).removed() 
-                && !next.is_null() 
-                && (*next).key <= (*new_node).key 
-                && !(*next).removed()) || prev.as_ref().removed() || !next.is_null() && (*next).removed()
+            if  (!(*new_node).removed() && !next.is_null() && (*next).key <= (*new_node).key && !(*next).removed()) 
+                || prev.as_ref().removed() 
+                || !next.is_null() && (*next).removed()
             {
                 return Err(i);
             }
@@ -955,7 +954,7 @@ mod sync_test {
             let list = list.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::thread_rng();
-                for _ in 0..1_000 {
+                for _ in 0..10_000 {
                     let target = rng.gen::<u8>();
                     if rng.gen::<u8>() % 5 == 0 {
                         list.remove(&target);
