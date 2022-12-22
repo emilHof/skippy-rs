@@ -1,29 +1,51 @@
-use crate::internal::skiplist::SkipList;
-use std::borrow::Borrow;
+use crate::internal::skiplist;
+use crate::internal::sync;
+use crate::skiplist::Entry;
 use std::marker::PhantomData;
 
+/// [PriorityQueue](PriorityQueue) is implemented using a [SkipList](crate::skiplist::SkipList) and is available as both
+/// a non-thread safe, but faster, and a thread-safe, yet slower, variation.
 pub struct PriorityQueue<V, L> {
     queue: L,
     _phantom: PhantomData<V>,
 }
 
-impl<'domain, V> PriorityQueue<V, SkipList<'domain, V, ()>>
+impl<'domain, V> PriorityQueue<V, ()>
 where
     V: Sync,
 {
-    pub fn new() -> Self {
+    pub fn new() -> PriorityQueue<V, skiplist::SkipList<'domain, V, ()>> {
         PriorityQueue {
-            queue: SkipList::new(),
+            queue: skiplist::SkipList::new(),
             _phantom: PhantomData,
         }
     }
+    pub fn new_sync() -> PriorityQueue<V, sync::SkipList<'domain, V, ()>> {
+        PriorityQueue {
+            queue: sync::SkipList::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+unsafe impl<V, L> Send for PriorityQueue<V, L>
+where
+    V: Send + Sync,
+    L: Send + Sync,
+{
+}
+
+unsafe impl<V, L> Sync for PriorityQueue<V, L>
+where
+    V: Send + Sync,
+    L: Send + Sync,
+{
 }
 
 impl<'a, V, L> PriorityQueue<V, L>
 where
     L: crate::skiplist::SkipList<V, ()> + 'a,
     V: Ord + 'a,
-    L::Entry<'a>: Borrow<V>,
 {
     pub fn push(&mut self, value: V) {
         self.queue.insert(value, ());
@@ -35,7 +57,7 @@ where
 
     pub fn pop(&'a mut self) -> Option<V> {
         match self.queue.front() {
-            Some(e) => self.queue.remove(e.borrow()).map(|(v, _)| v),
+            Some(e) => self.queue.remove(e.key()).map(|(v, _)| v),
             None => None,
         }
     }
@@ -133,5 +155,22 @@ mod pq_test {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_sync_push() {
+        let n = 1_000;
+        let mut seed: u32 = rand::random();
+        let mut queue = PriorityQueue::new_sync();
+
+        for _ in 0..n {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 7;
+
+            queue.push(seed);
+        }
+
+        assert!(queue.len() > 0);
     }
 }
