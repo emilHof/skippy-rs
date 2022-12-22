@@ -38,6 +38,10 @@ where
                 } => {
                     let new_node = Node::new_rand_height(key, val, self);
 
+                    let mut hazard = HazardPointer::new_in_domain(&self.garbage.domain);
+
+                    hazard.protect_raw(new_node);
+
                     let mut starting_height = 0;
 
                     while let Err(starting) =
@@ -97,7 +101,9 @@ where
     ) -> Result<(), usize> {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..(*new_node).height() {
-            // println!("height: {}", (*new_node).height());
+            if (*new_node).height() > 31 {
+                println!("height: {}, of {:?}", (*new_node).height(), new_node);
+            }
             let (prev, next) = previous_nodes[i];
 
             // we check if the next node is actually lower in key than our current node.
@@ -179,18 +185,23 @@ where
                     let val = core::ptr::read(&(*target).val);
                     let mut height = (*target).height();
 
-                    while let Err(new_height) = self.unlink(target, height, prev, level_hazards) {
+                    'unlink: while let Err(new_height) = self.unlink(target, height, prev, level_hazards) {
                         (target, height, prev, hazard, level_hazards) = {
-                            if let SearchResult {
-                                target: Some((target, hazard)),
-                                prev,
-                                level_hazards,
-                            } = self.find(&key, true)
-                            {
-                                // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
-                                (target.as_ptr(), new_height, prev, hazard, level_hazards)
-                            } else {
-                                break;
+                            loop {
+                                if let SearchResult {
+                                    target: Some((new_target, hazard)),
+                                    prev,
+                                    level_hazards,
+                                } = self.find(&key, true)
+                                {
+                                    if !core::ptr::eq(new_target.as_ptr(), target) {
+                                        continue;
+                                    }
+                                    // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
+                                    break (new_target.as_ptr(), new_height, prev, hazard, level_hazards)
+                                } else {
+                                    break 'unlink;
+                                }
                             }
                         };
                     }
@@ -343,7 +354,7 @@ where
                             if (*next).key < *key || ( (*next).key == *key && (*next).removed() && !allow_removed ) => {
 
                             // If the current node is being removed, we try to help unlinking it at this level.
-                            println!("accessing cur: {:?}", curr);
+                            // println!("accessing cur: {:?}", curr);
                             if (*curr).removed() {
                                 if let Err(_) = Self::unlink_level(prev[level - 1].0.as_ptr(), curr, next, level - 1) {
                                     continue 'search;

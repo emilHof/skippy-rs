@@ -133,7 +133,7 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.height_and_removed.load(Ordering::Relaxed) << 1 >> 1) as usize
+        (self.height_and_removed.load(Ordering::Relaxed) & (u32::MAX ^ REMOVED_MASK)) as usize
     }
 
     pub(crate) fn removed(&self) -> bool {
@@ -146,7 +146,7 @@ impl<K, V> Node<K, V> {
     pub(crate) fn set_removed(&self) -> Result<u32, ()> {
         let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
         // if removed is set then someone else is already removing the node
-        if height_and_removed.leading_zeros() == 0 {
+        if height_and_removed.leading_zeros() == 0 || self.removed() {
             return Err(());
         }
 
