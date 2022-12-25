@@ -1,6 +1,6 @@
 #![feature(test)]
 use crossbeam_skiplist::SkipMap;
-use skippy::SkipList;
+use skippy::{SSkipList, SkipList};
 use std::sync::{atomic::AtomicUsize, Arc};
 
 extern crate test;
@@ -55,6 +55,35 @@ fn insert_skippy(b: &mut Bencher) {
 
     b.iter(|| {
         let list = SkipList::new();
+
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            list.insert(
+                CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                },
+                "Hello There!",
+            );
+        }
+    });
+
+    println!(
+        "cmp count for insert skippy: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}
+
+#[bench]
+fn insert_sync_skippy(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    b.iter(|| {
+        let list = SSkipList::new();
 
         for _ in 0..upper {
             seed ^= seed << 6;
@@ -148,8 +177,7 @@ fn get_skippy(b: &mut Bencher) {
 fn get_skippy_sync(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
-    let list: skippy::internal::sync::SkipList<CountOnCmp<u16>, u8> =
-        skippy::internal::sync::SkipList::new();
+    let list = SSkipList::new();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -266,8 +294,7 @@ fn remove_skippy(b: &mut Bencher) {
 fn remove_skippy_sync(b: &mut Bencher) {
     let upper = test::black_box(1_000);
     let mut seed: u16 = rand::random();
-    let list: skippy::internal::sync::SkipList<CountOnCmp<u16>, u8> =
-        skippy::internal::sync::SkipList::new();
+    let list = SSkipList::new();
 
     let counter = Arc::new(AtomicUsize::new(0));
 

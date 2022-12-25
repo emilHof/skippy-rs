@@ -112,7 +112,7 @@ impl<K, V> Node<K, V> {
         let height = (*ptr).height();
 
         let layout = Self::get_layout(height);
-        println!("deallocating {:?}", ptr);
+        // println!("deallocating {:?}", ptr);
 
         dealloc(ptr.cast(), layout);
     }

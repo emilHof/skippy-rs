@@ -47,7 +47,7 @@ where
     L: crate::skiplist::SkipList<V, ()> + 'a,
     V: Ord + 'a,
 {
-    pub fn push(&mut self, value: V) {
+    pub fn push(&self, value: V) {
         self.queue.insert(value, ());
     }
 
@@ -55,7 +55,7 @@ where
         self.queue.front()
     }
 
-    pub fn pop(&'a mut self) -> Option<V> {
+    pub fn pop(&'a self) -> Option<V> {
         match self.queue.front() {
             Some(e) => self.queue.remove(e.key()).map(|(v, _)| v),
             None => None,
@@ -79,7 +79,7 @@ mod pq_test {
 
     #[test]
     fn test_push() {
-        let mut queue = PriorityQueue::new();
+        let queue = PriorityQueue::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..10_000 {
@@ -91,7 +91,7 @@ mod pq_test {
 
     #[test]
     fn test_pop() {
-        let mut queue = PriorityQueue::new();
+        let queue = PriorityQueue::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..10_000 {
@@ -113,7 +113,7 @@ mod pq_test {
     fn test_push_pop() {
         let n = 1_000;
         let mut seed: u32 = rand::random();
-        let mut queue = PriorityQueue::new();
+        let queue = PriorityQueue::new();
 
         for _ in 0..n {
             seed ^= seed << 13;
@@ -137,7 +137,7 @@ mod pq_test {
     fn test_with_std() {
         let n = 100_000;
         let mut seed: u8 = rand::random();
-        let mut queue = PriorityQueue::new();
+        let queue = PriorityQueue::new();
         let mut sq = BinaryHeap::new();
 
         for _ in 0..n {
@@ -161,7 +161,7 @@ mod pq_test {
     fn test_sync_push() {
         let n = 1_000;
         let mut seed: u32 = rand::random();
-        let mut queue = PriorityQueue::new_sync();
+        let queue = PriorityQueue::new_sync();
 
         for _ in 0..n {
             seed ^= seed << 13;
