@@ -55,13 +55,16 @@ where
                                 level_hazards,
                                 target,
                             } = self.find(&(*new_node).key, false);
-                            if let Some(target) = target {
+                            if let Some(_target) = target {
                                 if starting == 0 {
-                                    // println!("target: {:?}, new: {:?}", target.0.as_ptr(), new_node);
+                                    // TODO Implement something like this in a concurrency-safe
+                                    // way!
+                                    /* 
                                     std::mem::swap(
-                                        &mut (*target.0.as_ptr()).val,
+                                        &mut (*_target.0.as_ptr()).val,
                                         &mut (*new_node).val,
                                     );
+                                    */
 
                                     self.retire_node(new_node);
 
@@ -101,6 +104,7 @@ where
         previous_nodes: [(NonNull<Node<K, V>>, *mut Node<K, V>); HEIGHT],
         start_height: usize,
     ) -> Result<(), usize> {
+        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..(*new_node).height() {
             /*
@@ -109,7 +113,13 @@ where
                 println!("height: {}, of {:?}", (*new_node).height(), new_node);
             }
             */
-            let (prev, next) = previous_nodes[i];
+            let (prev, _) = previous_nodes[i];
+
+            if prev.as_ref().removed() {
+                return Err(i)
+            }
+
+            let next = hazard.protect_ptr(prev.as_ref().levels[i].as_std()).map_or(core::ptr::null_mut(), |n| n.0.as_ptr());
 
             // we check if the next node is actually lower in key than our current node.
             if (!next.is_null()
@@ -198,7 +208,7 @@ where
                     let mut height = (*target).height();
 
                     'unlink: while let Err(new_height) = self.unlink(target, height, prev, level_hazards) {
-                        (target, height, prev, _hazard, level_hazards) = {
+                        (height, prev, _hazard, level_hazards) = {
                             loop {
                                 if let SearchResult {
                                     target: Some((new_target, hazard)),
@@ -210,7 +220,7 @@ where
                                         continue;
                                     }
                                     // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
-                                    break (new_target.as_ptr(), new_height, prev, hazard, level_hazards)
+                                    break (new_height, prev, hazard, level_hazards)
                                 } else {
                                     break 'unlink;
                                 }
@@ -253,6 +263,7 @@ where
         if self.is_head(node) {
             panic!()
         }
+        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
 
         // # Safety
         //
@@ -260,13 +271,24 @@ where
         // 4. We are not unlinking the head. - Covered by previous safety check.
         unsafe {
             for (i, &(prev, next)) in previous_nodes.iter().enumerate().take(height).rev() {
-                let new_next = (*node).levels[i].as_std().load(Ordering::SeqCst);
+                let new_next = hazard.protect_ptr((*node).levels[i].as_std()).map_or(core::ptr::null_mut(), |n| n.0.as_ptr());
+
+                // We check if the previous node is being removed after we have already unlinked
+                // from it as the prev nodes expects us to do this.
+                // We still need to stop the unlink here, as we will have to relink to the actual,
+                // lively previous node at this level as well.
+                if prev.as_ref().removed() {
+                    return Err(i + 1);
+                }
 
                 // If someone has already unlinked the node at this level, we simply continue.
                 if core::ptr::eq(prev.as_ref().levels[i].load_ptr(), new_next) {
                     continue;
                 } 
 
+                if !core::ptr::eq(node, next) {
+                    return Err(i + 1);
+                }
                 // Performs a compare_exchange, expecting the old value of the pointer to be the current
                 // node. If it is not, we cannot make any reasonable progress, so we search again.
                 if let Err(_) = prev.as_ref().levels[i].as_std().compare_exchange(
@@ -275,18 +297,6 @@ where
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                 ) {
-                    return Err(i + 1);
-                }
-
-                if !core::ptr::eq(node, next) {
-                    return Err(i + 1);
-                }
-
-                // We check if the previous node is being removed after we have already unlinked
-                // from it as the prev nodes expects us to do this.
-                // We still need to stop the unlink here, as we will have to relink to the actual,
-                // lively previous node at this level as well.
-                if prev.as_ref().removed() {
                     return Err(i + 1);
                 }
             }
@@ -320,7 +330,7 @@ where
         }
     }
 
-    unsafe fn find<'a>(&'a self, key: &K, allow_removed: bool) -> SearchResult<'a, K, V> {
+    unsafe fn find<'a>(&'a self, key: &K, search_removed: bool) -> SearchResult<'a, K, V> {
         let mut level_hazards: HazardPointerArray<'a, Global, HEIGHT> =
             HazardPointer::many_in_domain(self.garbage.domain);
 
@@ -381,7 +391,7 @@ where
                         Some(next) 
                             // This check should ensure that we always get a non-removed node, if there
                             // is one, of our target key, as long as allow removed is set to false.
-                            if (*next).key < *key => {
+                            if (*next).key < *key || ((*next).key == *key && !(*next).removed() && search_removed) => {
                             // If the current node is being removed, we try to help unlinking it at this level.
                             /*
                             if (*curr).removed() {
@@ -427,7 +437,7 @@ where
                 return if core::ptr::eq(next, prev[0].1)
                     && !next.is_null()
                     && (*next).key == *key
-                    && (allow_removed || !(*next).removed()) {
+                    && (search_removed || !(*next).removed()) {
                     SearchResult {
                         prev,
                         level_hazards,
@@ -965,16 +975,16 @@ mod sync_test {
         let list = Arc::new(SkipList::new());
         let mut rng = rand::thread_rng();
 
-        for _ in 0..1_000 {
-            list.insert(rng.gen::<u8>(), ());
+        for _ in 0..10_000 {
+            list.insert(rng.gen::<u16>(), ());
         }
         let threads = (0..30)
             .map(|_| {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..10_000 {
-                        let target = &rng.gen::<u8>();
+                    for _ in 0..1_000 {
+                        let target = &rng.gen::<u16>();
                         let success = list.remove(&target);
                         if success.is_some() {
                             println!("{:?}", success);
@@ -1045,11 +1055,9 @@ mod sync_test {
                         if rng.gen::<u8>() % 5 == 0 {
                             list.remove(&target);
                         } else {
-                            // println!("inserting: {}", target);
                             list.insert(target, ());
                         }
                     }
-                    // println!("all done!");
                 })
             })
             .collect::<Vec<_>>();
