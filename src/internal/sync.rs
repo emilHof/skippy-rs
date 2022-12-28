@@ -113,17 +113,13 @@ where
                 println!("height: {}, of {:?}", (*new_node).height(), new_node);
             }
             */
-            let (prev, old_next) = previous_nodes[i];
+            let (prev, _) = previous_nodes[i];
 
             if prev.as_ref().removed() {
                 return Err(i)
             }
 
             let next = hazard.protect_ptr(prev.as_ref().levels[i].as_std()).map_or(core::ptr::null_mut(), |n| n.0.as_ptr());
-
-            if !core::ptr::eq(old_next, new_node) {
-                return Err(i)
-            }
 
             // we check if the next node is actually lower in key than our current node.
             if (!next.is_null()
