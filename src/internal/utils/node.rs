@@ -112,7 +112,6 @@ impl<K, V> Node<K, V> {
         let height = (*ptr).height();
 
         let layout = Self::get_layout(height);
-        // println!("deallocating {:?}", ptr);
 
         dealloc(ptr.cast(), layout);
     }
@@ -146,9 +145,14 @@ impl<K, V> Node<K, V> {
     pub(crate) fn set_removed(&self) -> Result<u32, ()> {
         let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
         // if removed is set then someone else is already removing the node
+        if height_and_removed & REMOVED_MASK != 0 {
+            return Err(());
+        }
+        /*
         if height_and_removed.leading_zeros() == 0 || self.removed() {
             return Err(());
         }
+        */
 
         // set removed
         let new_height_and_removed = height_and_removed | REMOVED_MASK;
