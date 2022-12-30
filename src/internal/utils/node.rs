@@ -1,7 +1,7 @@
 extern crate alloc;
 
+use crate::internal::sync::tagged::MaybeTagged;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
-use haphazard::AtomicPtr;
 
 const REMOVED_MASK: u32 = (1 as u32) << 31;
 
@@ -42,7 +42,7 @@ impl<K, V> Head<K, V> {
 
 #[repr(C)]
 pub(crate) struct Levels<K, V> {
-    pub(crate) pointers: [AtomicPtr<Node<K, V>>; 1],
+    pub(crate) pointers: [MaybeTagged<Node<K, V>>; 1],
 }
 
 impl<K, V> Levels<K, V> {
@@ -54,7 +54,7 @@ impl<K, V> Levels<K, V> {
 }
 
 impl<K, V> Index<usize> for Levels<K, V> {
-    type Output = AtomicPtr<Node<K, V>>;
+    type Output = MaybeTagged<Node<K, V>>;
 
     fn index(&self, index: usize) -> &Self::Output {
         unsafe { self.pointers.get_unchecked(index) }
@@ -211,7 +211,7 @@ where
             .field(
                 "levels",
                 &(0..self.height()).fold(String::new(), |acc, level| {
-                    format!("{}{:?}, ", acc, self.levels[level])
+                    format!("{}{:?}, ", acc, self.levels[level].as_std())
                 }),
             )
             .finish()

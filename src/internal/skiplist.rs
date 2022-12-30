@@ -355,14 +355,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -379,14 +379,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -403,14 +403,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -453,14 +453,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -477,14 +477,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -509,14 +509,14 @@ mod test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];

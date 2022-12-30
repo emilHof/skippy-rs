@@ -1,13 +1,15 @@
 use core::{borrow::Borrow, fmt::Debug, marker::Sync, sync::atomic::Ordering};
 use std::{ptr::NonNull, sync::atomic::AtomicPtr};
 
-use haphazard::{raw::Reclaim, Global, HazardPointer, Domain, Replaced};
+use haphazard::{raw::Reclaim, Global, HazardPointer, Domain};
 
 #[allow(unused_imports)]
 use crate::{
     internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
     skiplist,
 };
+
+pub(crate) mod tagged;
 
 skiplist_basics!(SkipList);
 
@@ -93,24 +95,19 @@ where
         for i in start_height..new_node.height() {
             let (prev, expected_next) = &previous_nodes[i];
 
-            if prev.removed() {
-                return Err(i)
-            }
-
-            let next = NodeRef::from_ptr(prev.levels[i].as_std());
+            let next = NodeRef::from_maybe_tagged(&prev.levels[i]);
             let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
             if !core::ptr::eq(*expected_next, next_ptr) {
-                /*
-                println!("{:?}, {:?}, {:?}", expected_next, next, i);
-                println!("error inserting, nexts are not equal");
-                */
+                println!("error inserting, nexts are not equal; {:?}, {:?}, {:?}", expected_next, next_ptr, i);
                 return Err(i)
             }
 
-            // we check if the next node is actually lower in key than our current node.
+            if core::ptr::eq(next_ptr, new_node.as_ptr()) {
+                println!("next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
+            }
 
-            
+            // we check if the next node is actually lower in key than our current node.
             if next.as_ref()
                 .and_then(|n| if n.key <= new_node.key && !new_node.removed() {
                     Some(())
@@ -140,17 +137,16 @@ where
             // It could be the case that we link ourselves to the previous node, but just as we do
             // this `next` attempts to unlink itself and fails. So while we succeeded, `next`
             // repeats its search and finds that we are the next
-            new_node.levels[i].as_std().store(next_ptr, Ordering::Release);
+            new_node.levels[i].store_ptr(next_ptr);
 
             // Swap the new_node into the previous' level. If the previous' level has changed since
             // the search, we repeat the search from this level.
-            if let Err(_other) = prev.as_ref().levels[i].as_std().compare_exchange(
-                next_ptr,
-            //  ^^^^------------- Ensure that next is still the same.
-                new_node.as_ptr(),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
+            if let Err((_other, _tag)) = prev.levels[i].compare_exchange(
+                next_ptr, 
+                new_node.as_ptr()
             ) {
+                let _ = prev.levels[i].compare_exchange_with_tag(next_ptr, 2, next_ptr, 0);
+                println!("failed to swap on link; next_ptr: {:?}, tagged: {:?}, tag: {}", next_ptr, _other, _tag);
                 return Err(i);
             }
         }
@@ -205,11 +201,10 @@ where
                                 prev,
                             } = self.find(&key, true)
                             {
-                                if new_target != target {
-                                    continue;
+                                if new_target == target {
+                                    break (new_height, prev)
                                 }
                                 // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
-                                break (new_height, prev)
                             } else {
                                 break 'unlink;
                             }
@@ -221,7 +216,7 @@ where
                 // #Safety:
                 //
                 // we are the only thread that has permission to drop this node.
-                self.retire_node(target.node.as_ptr());
+                self.retire_node(target.as_ptr());
 
                 // We see if we can drop some pointers in the list.
                 self.garbage.domain.eager_reclaim();
@@ -253,7 +248,7 @@ where
         // 1.-3. Some as method and covered by method caller.
         // 4. We are not unlinking the head. - Covered by previous safety check.
         for (i, (prev, next)) in previous_nodes.iter().enumerate().take(height).rev() {
-            let new_next = node.levels[i].as_std().load(Ordering::Acquire);
+            let (new_next, _tag) = node.levels[i].load_decomposed();
 
             // We check if the previous node is being removed after we have already unlinked
             // from it as the prev nodes expects us to do this.
@@ -270,20 +265,25 @@ where
             } 
 
             if !core::ptr::eq(node.as_ptr(), *next) {
-                // println!("error unlinking at equal");
+                // println!("failed at ptr equals: {:?} vs {:?}", node.as_ptr(), *next);
                 return Err(i + 1);
             }
+
+            // tag the pointer as removed
+            node.levels[i].tag(1);
+            // println!("ptr: {:?}, tag: {:?}", node.levels[i].load_decomposed().0, node.levels[i].load_decomposed().1);
+
             // Performs a compare_exchange, expecting the old value of the pointer to be the current
             // node. If it is not, we cannot make any reasonable progress, so we search again.
-            if let Err(_) = prev.as_ref().levels[i].as_std().compare_exchange(
+            if let Err((_other, _tag)) = prev.levels[i].compare_exchange(
                 node.as_ptr(),
                 new_next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
             ) {
-                // println!("error unlinking at swap");
+                let _ = prev.levels[i].compare_exchange_with_tag(node.as_ptr(), 2, node.as_ptr(), 0);
+                println!("error unlinking at swap; expected: {:?}, actual: {:?}, tag: {}", node.as_ptr(), _other, _tag);
                 return Err(i + 1);
             }
+            node.levels[i].tag(2);
         }
 
         Ok(())
@@ -294,6 +294,7 @@ where
     /// # Safety
     ///
     /// 1. `prev`, `curr`, and `next`, are all protected accesses.
+    #[allow(unused)]
     unsafe fn unlink_level(
         prev: *mut Node<K, V>,
         curr: *mut Node<K, V>,
@@ -302,7 +303,6 @@ where
     ) -> Result<*mut Node<K, V>, ()> {
         (*prev).levels[level].as_std().compare_exchange(curr, next, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| ())
     }
-
 
     fn retire_node(&self, node_ptr: *mut Node<K, V>) {
         /*
@@ -358,18 +358,20 @@ where
             //     1.2 If we the `next` node is less or equal but removed and removed nodes are
             //       disallowed, then we set our current node to the next node.
             while level > 0 {
-                let next = unsafe { NodeRef::from_ptr(&curr.levels[level - 1].as_std()) };
+                let next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
 
             /*
-            next.as_ref().map(|n| println!(
-                        "accessing next: {:?}({}), from: {:?}({}) at level: {}, while searching for {}", 
-                        n,
-                        (*(*n as *mut Node<u8, ()>)).key, 
-                        curr,
-                        (*(curr as *mut Node<u8, ()>)).key, 
-                        level - 1,
-                        *(key as *const _ as *const u8)
+                unsafe {
+                    next.as_ref().map(|n| println!(
+                            "accessing next: {:?}({}), from: {:?}({}) at level: {}, while searching for {}", 
+                            n.as_ptr(),
+                            (*(n.as_ptr() as *mut Node<u8, ()>)).key, 
+                            curr.as_ptr(),
+                            (*(curr.as_ptr() as *mut Node<u8, ()>)).key, 
+                            level - 1,
+                            *(key as *const _ as *const u8)
                     ));
+                }
                         "accessing next: {:?}, from: {:?} at level: {}, while searching for {}", 
                         (*(*n as *mut Node<u8, ()>)).key, 
                         (*(curr as *mut Node<u8, ()>)).key, 
@@ -393,12 +395,12 @@ where
                         */
                         
                         // Update previous_nodes.
-                        prev[level - 1] = (curr, next.node.as_ptr());
+                        prev[level - 1] = (curr, next.as_ptr());
 
                         curr = next;
                     },
                     opt => {
-                        let next = opt.map_or(core::ptr::null_mut(), |next| next.node.as_ptr());
+                        let next = opt.map_or(core::ptr::null_mut(), |next| next.as_ptr());
                         /*
                         if (*curr).removed() {
                             if let Err(_) = Self::unlink_level(prev[level - 1].0.as_ptr(), curr, next, level - 1) {
@@ -415,7 +417,7 @@ where
                 }
             }
 
-            return match unsafe { NodeRef::from_ptr(prev[0].0.as_ref().levels[0].as_std()) } {
+            return match NodeRef::from_maybe_tagged(&prev[0].0.as_ref().levels[0]) {
                 Some(next) if next.key == *key && (search_removed || !next.removed()) => SearchResult { prev, target: Some(next) },
                 _ => SearchResult { prev, target: None }
             }
@@ -446,25 +448,15 @@ where
             return None;
         }
 
-        let mut hazard = HazardPointer::new_in_domain(self.garbage.domain);
-        let mut next_hazard = HazardPointer::new_in_domain(self.garbage.domain);
         let mut curr = unsafe {
-            hazard
-                .protect_ptr((*self.head.as_ptr()).levels[0].as_std())?
-                .0
-                .as_ptr()
+            NodeRef::from_ptr(self.head.as_ref().levels[0].as_std())?
         };
 
-        while let Some((next, _)) = unsafe { next_hazard.protect_ptr((*curr).levels[0].as_std()) } {
-            curr = next.as_ptr();
-            hazard.protect_raw(curr);
-            if unsafe { !(*curr).removed() } {
-                unsafe {
-                    return Some(Entry {
-                        node: NonNull::new_unchecked(curr),
-                        _hazard: hazard,
-                    });
-                }
+        while let Some(next) = NodeRef::from_maybe_tagged(&curr.levels[0]) {
+            curr = next;
+
+            if !curr.removed() {
+                return Some(Entry::from(curr));
             }
         }
 
@@ -477,34 +469,18 @@ where
         }
 
         'last: loop {
-            let mut hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
-            let mut next_hazard = haphazard::HazardPointer::new_in_domain(self.garbage.domain);
-            let mut curr = unsafe {
-                hazard
-                    .protect_ptr((*self.head.as_ptr()).levels[0].as_std())?
-                    .0
-                    .as_ptr()
-            };
+            let mut curr =
+                unsafe { NodeRef::from_maybe_tagged(&self.head.as_ref().levels[0])? };
 
-            while let Some((next, _)) =
-                unsafe { next_hazard.protect_ptr((*curr).levels[0].as_std()) }
-            {
-                curr = next.as_ptr();
-                hazard.protect_raw(curr);
+            while let Some(next) = NodeRef::from_maybe_tagged(&curr.levels[0]) {
+                curr = next;
             }
 
-            if unsafe { (*curr).removed() } {
-                hazard.reset_protection();
-                next_hazard.reset_protection();
+            if curr.removed() {
                 continue 'last;
             }
 
-            unsafe {
-                return Some(Entry {
-                    node: NonNull::new_unchecked(curr),
-                    _hazard: hazard,
-                });
-            }
+            return Some(Entry::from(curr))
         }
     }
 }
@@ -668,20 +644,20 @@ impl<'a, K, V> NodeRef<'a, K, V> {
 
 impl<'a, K, V> AsRef<Node<K, V>> for NodeRef<'a, K, V> {
     fn as_ref(&self) -> &Node<K, V> {
-        unsafe { self.node.as_ref() }
+        unsafe { &(*self.as_ptr()) }
     }
 }
 
 impl<'a, K, V> core::ops::Deref for NodeRef<'a, K, V> {
     type Target = Node<K, V>;
     fn deref(&self) -> &Self::Target {
-        unsafe { self.node.as_ref() }
+        self.as_ref()
     }
 }
 
 impl<'a, K, V> core::ops::DerefMut for NodeRef<'a, K, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.node.as_mut() }
+        unsafe { &mut (*self.as_ptr()) }
     }
 }
 
@@ -703,6 +679,7 @@ impl<'a, K, V> From<NodeRef<'a, K, V>> for Entry<'a, K, V> {
             node,
             _hazard
         } = value;
+
         Entry { node, _hazard }
     }
 }
@@ -838,14 +815,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -862,14 +839,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -886,14 +863,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -936,14 +913,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -960,14 +937,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -992,14 +969,14 @@ mod sync_test {
             while !node.as_std().load(Ordering::Relaxed).is_null() {
                 println!(
                     "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node,
+                    node.as_std(),
                     (*node.as_std().load(Ordering::Relaxed)).key,
                     (*node.as_std().load(Ordering::Relaxed)).key
                 );
                 print!("                                ");
                 for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
                     let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left);
+                    print!("{:?} | ", left.as_std());
                 }
                 println!();
                 node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
@@ -1148,7 +1125,7 @@ mod sync_test {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..1_000 {
+                    for _ in 0..10_000 {
                         let target = rng.gen::<u8>();
                         if rng.gen::<u8>() % 5 == 0 {
                             list.remove(&target);
@@ -1165,10 +1142,10 @@ mod sync_test {
         }
 
         unsafe {
-            let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
-            while !node.is_null() {
-                println!("{:?} - {:?}", node, *node);
-                node = (*node).levels[0].load_ptr();
+            let mut node = NodeRef::from_maybe_tagged(&list.head.as_ref().levels[0]);
+            while let Some(next) = node {
+                println!("{:?} - {:?}", next.as_ptr(), *next);
+                node = NodeRef::from_maybe_tagged(&next.levels[0]);
             }
         }
     }
