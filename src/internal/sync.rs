@@ -293,24 +293,29 @@ where
     ///
     /// # Safety
     ///
-    /// 1. `prev`, `curr`, and `next`, are all protected accesses.
+    /// 1. `prev`, `curr`, are protected accesses.
     #[allow(unused)]
-    unsafe fn unlink_level(
-        prev: *mut Node<K, V>,
-        curr: *mut Node<K, V>,
-        next: *mut Node<K, V>,
+    unsafe fn unlink_level<'a>(
+        prev: NodeRef<'a, K, V>,
+        curr: NodeRef<'a, K, V>,
+        next: NodeRef<'a, K, V>,
         level: usize,
-    ) -> Result<*mut Node<K, V>, ()> {
-        (*prev).levels[level].as_std().compare_exchange(curr, next, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| ())
+    ) -> Result<NodeRef<'a, K, V>, ()> {
+        // The pointer to `next` is tagged to signal unlinking. 
+        curr.levels[level].tag(1);
+        if let Ok(_) =  prev.levels[level].compare_exchange(
+            curr.as_ptr(), 
+            next.as_ptr()
+        ) {
+            // On success we tag with `2` and return the pointer the next.  
+            curr.levels[level].tag(2);
+            return Ok(next)
+        }
+
+        Err(())
     }
 
     fn retire_node(&self, node_ptr: *mut Node<K, V>) {
-        /*
-        let owned = OwnedNode::from(node_ptr);
-        unsafe {
-            self.garbage.domain.retire_ptr::<_, Box<OwnedNode<K, V>>>(Box::into_raw(Box::new(owned)));
-        }
-        */
         unsafe {
             self.garbage
                 .domain
