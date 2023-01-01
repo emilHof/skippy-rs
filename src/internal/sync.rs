@@ -88,13 +88,15 @@ where
     unsafe fn link_nodes<'a>(
         &self,
         new_node: &'a NodeRef<'a, K, V>,
-        previous_nodes: [(NodeRef<'a, K, V>, *mut Node<K, V>); HEIGHT],
+        previous_nodes: [(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>); HEIGHT],
         start_height: usize,
     ) -> Result<(), usize> {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..new_node.height() {
-            let (prev, expected_next) = &previous_nodes[i];
+            let (prev, next) = &previous_nodes[i];
+            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
+            /*
             let next = NodeRef::from_maybe_tagged(&prev.levels[i]);
             let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
@@ -102,9 +104,10 @@ where
                 println!("error inserting, nexts are not equal; {:?}, {:?}, {:?}", expected_next, next_ptr, i);
                 return Err(i)
             }
+            */
 
             if core::ptr::eq(next_ptr, new_node.as_ptr()) {
-                println!("next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
+                println!("THE SAME!! next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
             }
 
             // we check if the next node is actually lower in key than our current node.
@@ -237,7 +240,7 @@ where
         &self,
         node: &'a NodeRef<'a, K, V>,
         height: usize,
-        previous_nodes: [(NodeRef<'a, K, V>, *mut Node<K, V>); HEIGHT],
+        previous_nodes: [(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>); HEIGHT],
     ) -> Result<(), usize> {
         // safety check against UB caused by unlinking the head
         if self.is_head(node.as_ptr()) {
@@ -260,11 +263,14 @@ where
             }
 
             // If someone has already unlinked the node at this level, we simply continue.
+            /*
             if core::ptr::eq(prev.levels[i].load_ptr(), new_next) {
+                println!("NODE ALREADY BUILT!");
                 continue;
             } 
+            */
 
-            if !core::ptr::eq(node.as_ptr(), *next) {
+            if !core::ptr::eq(node.as_ptr(), next.as_ref().map_or(core::ptr::null_mut() ,|n| n.as_ptr())) {
                 // println!("failed at ptr equals: {:?} vs {:?}", node.as_ptr(), *next);
                 return Err(i + 1);
             }
@@ -329,17 +335,17 @@ where
         let head = unsafe { &(*self.head.as_ptr()) };
 
         let mut prev = unsafe {
-            let mut prev: [core::mem::MaybeUninit<(NodeRef<'a, K, V>, *mut Node<K, V>)>; HEIGHT] 
+            let mut prev: [core::mem::MaybeUninit<(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>)>; HEIGHT] 
                 = core::mem::MaybeUninit::uninit().assume_init();
 
             for (i, level) in prev.iter_mut().enumerate() {
                 core::ptr::write(
                     level.as_mut_ptr(), 
-                    (NodeRef::from_raw(self.head.cast::<Node<K, V>>().as_ptr()), self.head.as_ref().levels[i].load_ptr())
+                    (NodeRef::from_raw(self.head.cast::<Node<K, V>>().as_ptr()), NodeRef::from_maybe_tagged(&self.head.as_ref().levels[i]))
                 )
             }
 
-            core::mem::transmute::<_, [(NodeRef<'a, K, V>, *mut Node<K, V>); HEIGHT]>(prev)
+            core::mem::transmute::<_, [(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>); HEIGHT]>(prev)
         };
 
 
@@ -400,12 +406,11 @@ where
                         */
                         
                         // Update previous_nodes.
-                        prev[level - 1] = (curr, next.as_ptr());
+                        prev[level - 1] = (curr, Some(next.clone()));
 
                         curr = next;
                     },
-                    opt => {
-                        let next = opt.map_or(core::ptr::null_mut(), |next| next.as_ptr());
+                    next => {
                         /*
                         if (*curr).removed() {
                             if let Err(_) = Self::unlink_level(prev[level - 1].0.as_ptr(), curr, next, level - 1) {
@@ -584,7 +589,7 @@ impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
 }
 
 struct SearchResult<'a, K, V> {
-    prev: [(NodeRef<'a, K, V>, *mut Node<K, V>); HEIGHT],
+    prev: [(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>); HEIGHT],
     target: Option<NodeRef<'a, K, V>>,
 }
 
