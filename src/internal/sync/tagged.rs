@@ -78,6 +78,13 @@ impl<T> MaybeTagged<T> {
         }
     }
 
+    pub(crate) fn try_tag(&self, expected: *mut T, tag: usize) -> Result<*mut T, *mut T> {
+        let old_tag = self.load_tag();
+        self.compare_exchange_with_tag(expected, old_tag, expected, tag)
+            .map(|s| s.0)
+            .map_err(|e| e.0)
+    }
+
     pub(crate) fn load_tag(&self) -> usize {
         self.load_decomposed().1
     }

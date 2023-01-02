@@ -204,9 +204,10 @@ where
                                 prev,
                             } = self.find(&key, true)
                             {
-                                if new_target == target {
+                                if new_target.as_ptr() == target.as_ptr() {
                                     break (new_height, prev)
                                 }
+                                println!("ON search, not equal!!");
                                 // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
                             } else {
                                 break 'unlink;
@@ -252,15 +253,18 @@ where
         // 4. We are not unlinking the head. - Covered by previous safety check.
         for (i, (prev, next)) in previous_nodes.iter().enumerate().take(height).rev() {
             let (new_next, _tag) = node.levels[i].load_decomposed();
+            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
             // We check if the previous node is being removed after we have already unlinked
             // from it as the prev nodes expects us to do this.
             // We still need to stop the unlink here, as we will have to relink to the actual,
             // lively previous node at this level as well.
+            /*
             if prev.removed() {
                 // println!("error, prev is removed");
                 return Err(i + 1);
             }
+            */
 
             // If someone has already unlinked the node at this level, we simply continue.
             /*
@@ -270,13 +274,17 @@ where
             } 
             */
 
-            if !core::ptr::eq(node.as_ptr(), next.as_ref().map_or(core::ptr::null_mut() ,|n| n.as_ptr())) {
+            if !core::ptr::eq(node.as_ptr(), next_ptr) {
+                println!("NEXT is NOT node! {:?} vs {:?}", node.as_ptr(), next_ptr);
                 // println!("failed at ptr equals: {:?} vs {:?}", node.as_ptr(), *next);
                 return Err(i + 1);
             }
 
             // tag the pointer as removed
-            node.levels[i].tag(1);
+            if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, _tag, new_next, 1) {
+                println!("FAILED to TAG!");
+                return Err(i + 1);
+            };
             // println!("ptr: {:?}, tag: {:?}", node.levels[i].load_decomposed().0, node.levels[i].load_decomposed().1);
 
             // Performs a compare_exchange, expecting the old value of the pointer to be the current
@@ -289,7 +297,10 @@ where
                 println!("error unlinking at swap; expected: {:?}, actual: {:?}, tag: {}", node.as_ptr(), _other, _tag);
                 return Err(i + 1);
             }
-            node.levels[i].tag(2);
+
+            if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, 1, new_next, 2) {
+                println!("FAILED to TAG with 2!");
+            };
         }
 
         Ok(())
@@ -308,17 +319,18 @@ where
         level: usize,
     ) -> Result<NodeRef<'a, K, V>, ()> {
         // The pointer to `next` is tagged to signal unlinking. 
-        curr.levels[level].tag(1);
-        if let Ok(_) =  prev.levels[level].compare_exchange(
-            curr.as_ptr(), 
-            next.as_ptr()
-        ) {
-            // On success we tag with `2` and return the pointer the next.  
-            curr.levels[level].tag(2);
-            return Ok(next)
-        }
-
-        Err(())
+        curr.levels[level]
+            .try_tag(next.as_ptr(), 1)
+            .and(prev.levels[level].compare_exchange(
+                    curr.as_ptr(), 
+                    next.as_ptr()
+                )
+                .map(|s| s.0)
+                .map_err(|e| e.0)
+            )
+            .and(curr.levels[level].try_tag(next.as_ptr(), 2))
+            .map(|s| next)
+            .map_err(|e| ())
     }
 
     fn retire_node(&self, node_ptr: *mut Node<K, V>) {
