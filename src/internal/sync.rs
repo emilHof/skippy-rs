@@ -48,6 +48,9 @@ where
 
                     let mut starting_height = 0;
 
+                    // The node should not be in build stage!
+                    // assert!(new_node.set_build_begin().is_ok());
+
                     while let Err(starting) =
                         self.link_nodes(&new_node, prev, starting_height)
                     {
@@ -69,6 +72,9 @@ where
                             (prev, starting)
                         };
                     }
+
+                    // The node should still be in build stage!
+                    // assert!(new_node.set_build_done().is_ok());
 
                     self.state.len.fetch_add(1, Ordering::Relaxed);
 
@@ -107,7 +113,7 @@ where
             */
 
             if core::ptr::eq(next_ptr, new_node.as_ptr()) {
-                println!("THE SAME!! next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
+                // println!("THE SAME!! next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
             }
 
             // we check if the next node is actually lower in key than our current node.
@@ -149,7 +155,7 @@ where
                 new_node.as_ptr()
             ) {
                 let _ = prev.levels[i].compare_exchange_with_tag(next_ptr, 2, next_ptr, 0);
-                println!("failed to swap on link; next_ptr: {:?}, tagged: {:?}, tag: {}", next_ptr, _other, _tag);
+                // println!("failed to swap on link; next_ptr: {:?}, tagged: {:?}, tag: {}", next_ptr, _other, _tag);
                 return Err(i);
             }
         }
@@ -207,7 +213,7 @@ where
                                 if new_target.as_ptr() == target.as_ptr() {
                                     break (new_height, prev)
                                 }
-                                println!("ON search, not equal!!");
+                                // println!("ON search, not equal!!");
                                 // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
                             } else {
                                 break 'unlink;
@@ -247,6 +253,11 @@ where
         if self.is_head(node.as_ptr()) {
             panic!()
         }
+
+        if node.build() {
+            return Err(height);
+        }
+
         // # Safety
         //
         // 1.-3. Some as method and covered by method caller.
@@ -275,14 +286,14 @@ where
             */
 
             if !core::ptr::eq(node.as_ptr(), next_ptr) {
-                println!("NEXT is NOT node! {:?} vs {:?}", node.as_ptr(), next_ptr);
+                // println!("NEXT is NOT node! {:?} vs {:?}", node.as_ptr(), next_ptr);
                 // println!("failed at ptr equals: {:?} vs {:?}", node.as_ptr(), *next);
                 return Err(i + 1);
             }
 
             // tag the pointer as removed
             if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, _tag, new_next, 1) {
-                println!("FAILED to TAG!");
+                // println!("FAILED to TAG!");
                 return Err(i + 1);
             };
             // println!("ptr: {:?}, tag: {:?}", node.levels[i].load_decomposed().0, node.levels[i].load_decomposed().1);
@@ -294,12 +305,12 @@ where
                 new_next,
             ) {
                 let _ = prev.levels[i].compare_exchange_with_tag(node.as_ptr(), 2, node.as_ptr(), 0);
-                println!("error unlinking at swap; expected: {:?}, actual: {:?}, tag: {}", node.as_ptr(), _other, _tag);
+                // println!("error unlinking at swap; expected: {:?}, actual: {:?}, tag: {}", node.as_ptr(), _other, _tag);
                 return Err(i + 1);
             }
 
             if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, 1, new_next, 2) {
-                println!("FAILED to TAG with 2!");
+                // println!("FAILED to TAG with 2!");
             };
         }
 

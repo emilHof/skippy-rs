@@ -4,6 +4,7 @@ use crate::internal::sync::tagged::MaybeTagged;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 
 const REMOVED_MASK: u32 = (1 as u32) << 31;
+const BUILD_MASK: u32 = (1 as u32) << 30;
 
 use core::{
     fmt::Debug,
@@ -132,7 +133,7 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.height_and_removed.load(Ordering::Relaxed) & (u32::MAX ^ REMOVED_MASK)) as usize
+        (self.height_and_removed.load(Ordering::Relaxed) & (!REMOVED_MASK & !BUILD_MASK)) as usize
     }
 
     pub(crate) fn removed(&self) -> bool {
@@ -143,19 +144,32 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn set_removed(&self) -> Result<u32, ()> {
-        let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
-        // if removed is set then someone else is already removing the node
-        if height_and_removed & REMOVED_MASK != 0 {
-            return Err(());
-        }
-        /*
-        if height_and_removed.leading_zeros() == 0 || self.removed() {
-            return Err(());
-        }
-        */
+        self.set_har_with(|old| old | REMOVED_MASK)
+    }
 
-        // set removed
-        let new_height_and_removed = height_and_removed | REMOVED_MASK;
+    pub(crate) fn build(&self) -> bool {
+        (self.height_and_removed.load(Ordering::SeqCst) & BUILD_MASK) >> 30 == 1
+    }
+
+    pub(crate) fn set_build_done(&self) -> Result<u32, ()> {
+        self.set_har_with(|old| old & !BUILD_MASK)
+    }
+
+    pub(crate) fn set_build_begin(&self) -> Result<u32, ()> {
+        self.set_har_with(|old| old | BUILD_MASK)
+    }
+
+    fn set_har_with<F>(&self, f: F) -> Result<u32, ()>
+    where
+        F: Fn(u32) -> u32,
+    {
+        let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
+
+        let new_height_and_removed = f(height_and_removed);
+
+        if new_height_and_removed == height_and_removed {
+            return Err(());
+        }
 
         // try to exchange
         self.height_and_removed
@@ -173,7 +187,8 @@ impl<K, V> Node<K, V> {
 
         let old_height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
 
-        let new_height_and_removed = (old_height_and_removed & REMOVED_MASK) | height as u32;
+        let new_height_and_removed =
+            (old_height_and_removed & (REMOVED_MASK | BUILD_MASK)) | height as u32;
 
         while let Err(other) = self.height_and_removed.compare_exchange(
             old_height_and_removed,
@@ -181,7 +196,8 @@ impl<K, V> Node<K, V> {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            if (other << 1 >> 1) <= height as u32 {
+            // If the new height is less then the height we are trying to set, we stop.
+            if (other & (!REMOVED_MASK & !BUILD_MASK)) <= height as u32 {
                 break;
             }
         }
@@ -257,5 +273,25 @@ mod node_test {
         assert_eq!(node.height(), 3);
 
         assert!(node.removed());
+
+        assert!(node.set_build_begin().is_ok());
+
+        assert!(node.build());
+
+        assert_eq!(node.height(), 3);
+
+        node.set_height(2);
+
+        assert_eq!(node.height(), 2);
+
+        assert!(node.build());
+
+        assert!(node.set_build_begin().is_err());
+
+        assert!(node.set_build_done().is_ok());
+
+        assert!(!node.build());
+
+        assert_eq!(node.height(), 2);
     }
 }
