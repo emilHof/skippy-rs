@@ -22,6 +22,7 @@ pub(crate) struct Head<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
     pub(crate) height_and_removed: AtomicU32,
+    pub(crate) refs: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -67,6 +68,7 @@ pub(crate) struct Node<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
     pub(crate) height_and_removed: AtomicU32,
+    pub(crate) refs: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -136,6 +138,18 @@ impl<K, V> Node<K, V> {
         (self.height_and_removed.load(Ordering::Relaxed) & (!REMOVED_MASK & !BUILD_MASK)) as usize
     }
 
+    pub(crate) fn refs(&self) -> usize {
+        self.refs.load(Ordering::SeqCst) as usize
+    }
+
+    pub(crate) fn add_ref(&self) -> usize {
+        self.refs.fetch_add(1, Ordering::SeqCst) as usize
+    }
+
+    pub(crate) fn sub_ref(&self) -> usize {
+        self.refs.fetch_sub(1, Ordering::SeqCst) as usize
+    }
+
     pub(crate) fn removed(&self) -> bool {
         self.height_and_removed
             .load(Ordering::SeqCst)
@@ -201,6 +215,15 @@ impl<K, V> Node<K, V> {
                 break;
             }
         }
+    }
+
+    pub(crate) fn tag_levels(&self, tag: usize) -> Result<usize, usize> {
+        for level in (0..self.height()).rev() {
+            if let Err(o_tag) = self.levels[level].compare_exchange_tag(0, tag) {
+                return Err(o_tag);
+            }
+        }
+        Ok(self.height() - 1)
     }
 }
 

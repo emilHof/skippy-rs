@@ -85,6 +85,20 @@ impl<T> MaybeTagged<T> {
             .map_err(|e| e.0)
     }
 
+    pub(crate) fn compare_exchange_tag(&self, e_tag: usize, tag: usize) -> Result<usize, usize> {
+        let mut ptr = self.load_ptr();
+        while let Err((other_ptr, other_tag)) = self.compare_exchange_with_tag(ptr, e_tag, ptr, tag)
+        {
+            if other_tag != e_tag {
+                return Err(other_tag);
+            }
+
+            ptr = other_ptr;
+        }
+
+        Ok(tag)
+    }
+
     pub(crate) fn load_tag(&self) -> usize {
         self.load_decomposed().1
     }

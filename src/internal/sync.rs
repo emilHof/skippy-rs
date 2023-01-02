@@ -1,11 +1,14 @@
-use core::{borrow::Borrow, fmt::Debug, marker::Sync, sync::atomic::Ordering};
-use std::{ptr::NonNull, sync::atomic::AtomicPtr};
+use core::borrow::Borrow;
+use core::fmt::Debug;
+use core::marker::Sync;
+use core::ptr::NonNull;
+use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::Ordering;
 
 use haphazard::{raw::Reclaim, Global, HazardPointer, Domain};
 
-#[allow(unused_imports)]
 use crate::{
-    internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
+    internal::utils::{skiplist_basics, GeneratesHeight, Node, HEIGHT},
     skiplist,
 };
 
@@ -73,6 +76,7 @@ where
                         };
                     }
 
+
                     // The node should still be in build stage!
                     // assert!(new_node.set_build_done().is_ok());
 
@@ -99,22 +103,12 @@ where
     ) -> Result<(), usize> {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..new_node.height() {
+            if new_node.removed() {
+                break;
+            }
+
             let (prev, next) = &previous_nodes[i];
             let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
-
-            /*
-            let next = NodeRef::from_maybe_tagged(&prev.levels[i]);
-            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
-
-            if !core::ptr::eq(*expected_next, next_ptr) {
-                println!("error inserting, nexts are not equal; {:?}, {:?}, {:?}", expected_next, next_ptr, i);
-                return Err(i)
-            }
-            */
-
-            if core::ptr::eq(next_ptr, new_node.as_ptr()) {
-                // println!("THE SAME!! next: {:?}, new: {:?}", next_ptr, new_node.as_ptr());
-            }
 
             // we check if the next node is actually lower in key than our current node.
             if next.as_ref()
@@ -124,21 +118,6 @@ where
                     None
                 }).is_some()
             {
-                /*
-                println!("{} or {}",!next.is_null()
-                && (*next).key <= (*new_node).key
-                && !(*next).removed(), prev.as_ref().removed() );
-                println!("prev: {:?}, new: {:?}, next: {:?}, level: {}", prev.node.as_ptr(), new_node.node, next, i);
-                if !next.is_null() && !self.is_head(prev.node.as_ptr()) {
-                    println!(
-                        "prev: {:?}, new: {:?}, next: {:?}, level: {}", 
-                        (*(prev.node.as_ptr() as *mut Node<u8, ()>)).key, 
-                        (*(new_node.node.as_ptr() as *mut Node<u8, ()>)).key, 
-                        (*(next as *mut Node<u8, ()>)).key, i
-                    );
-                }
-                println!("error inserting, failed to swap");
-                */
                 return Err(i);
             }
             
@@ -154,10 +133,10 @@ where
                 next_ptr, 
                 new_node.as_ptr()
             ) {
-                let _ = prev.levels[i].compare_exchange_with_tag(next_ptr, 2, next_ptr, 0);
-                // println!("failed to swap on link; next_ptr: {:?}, tagged: {:?}, tag: {}", next_ptr, _other, _tag);
                 return Err(i);
             }
+
+            new_node.add_ref();
         }
         Ok(())
     }
@@ -171,26 +150,23 @@ where
     match self.find(key, false) {
         SearchResult {
                 target: Some(target),
-                mut prev,
+                prev,
             } => {
-                // println!("found target: {:?}", target);
 
                 // Set the target state to being removed
                 // If this errors, it is already being removed by someone else
                 // and thus we exit early.
-                // println!("checking if {:?} has been removed", target);
-
                 if target.set_removed().is_err() {
                     return None;
                 }
 
-                // println!("{:?} has not been removed yet", target);
-                
+                self.state.len.fetch_sub(1, Ordering::Relaxed);
+
                 // # Safety:
                 // 1. `key` and `val` will not be tempered with.
                 // TODO This works for now, yet once `Atomic` is used
                 // this may need to change.
-                let (key, val, mut height) = unsafe {
+                let (key, val, height) = unsafe {
                     (
                         core::ptr::read(&target.key),
                         core::ptr::read(&target.val),
@@ -198,40 +174,27 @@ where
                     )
                 };
 
+                if let Err(_) = target.tag_levels(1) {
+                    panic!("SHOULD NOT BE TAGGED!")
+                };
+
                 // #Safety:
                 // 1. The height we got from the `node` guarantees it is a valid height for levels.
-                'unlink: while let Err(new_height) = unsafe { 
-                    self.unlink(&target, height, prev) 
-                } {
-                    (height, prev) = {
-                        loop {
-                            if let SearchResult {
-                                target: Some(new_target),
-                                prev,
-                            } = self.find(&key, true)
-                            {
-                                if new_target.as_ptr() == target.as_ptr() {
-                                    break (new_height, prev)
-                                }
-                                // println!("ON search, not equal!!");
-                                // println!("retried search for: {:?}, prev is now {:?}", target.as_ptr(), &prev[0..target.as_ref().height()]);
-                            } else {
-                                break 'unlink;
-                            }
-                        }
-                    };
+                unsafe {
+                    if self.unlink(&target, height, prev).is_ok() {
+                        // TODO Ensure the safety of this!
+                        // #Safety:
+                        //
+                        // we are the only thread that has permission to drop this node.
+                        self.retire_node(target.as_ptr());
+
+                        // We see if we can drop some pointers in the list.
+                        self.garbage.domain.eager_reclaim();
+                    } else {
+                        self.find(&key, false);
+                    }
                 }
 
-                // TODO Ensure the safety of this!
-                // #Safety:
-                //
-                // we are the only thread that has permission to drop this node.
-                self.retire_node(target.as_ptr());
-
-                // We see if we can drop some pointers in the list.
-                self.garbage.domain.eager_reclaim();
-
-                self.state.len.fetch_sub(1, Ordering::Relaxed);
 
                 Some((key, val))
             }
@@ -254,49 +217,18 @@ where
             panic!()
         }
 
-        if node.build() {
-            return Err(height);
-        }
-
         // # Safety
         //
         // 1.-3. Some as method and covered by method caller.
         // 4. We are not unlinking the head. - Covered by previous safety check.
         for (i, (prev, next)) in previous_nodes.iter().enumerate().take(height).rev() {
             let (new_next, _tag) = node.levels[i].load_decomposed();
-            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
+            let _next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
             // We check if the previous node is being removed after we have already unlinked
             // from it as the prev nodes expects us to do this.
             // We still need to stop the unlink here, as we will have to relink to the actual,
             // lively previous node at this level as well.
-            /*
-            if prev.removed() {
-                // println!("error, prev is removed");
-                return Err(i + 1);
-            }
-            */
-
-            // If someone has already unlinked the node at this level, we simply continue.
-            /*
-            if core::ptr::eq(prev.levels[i].load_ptr(), new_next) {
-                println!("NODE ALREADY BUILT!");
-                continue;
-            } 
-            */
-
-            if !core::ptr::eq(node.as_ptr(), next_ptr) {
-                // println!("NEXT is NOT node! {:?} vs {:?}", node.as_ptr(), next_ptr);
-                // println!("failed at ptr equals: {:?} vs {:?}", node.as_ptr(), *next);
-                return Err(i + 1);
-            }
-
-            // tag the pointer as removed
-            if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, _tag, new_next, 1) {
-                // println!("FAILED to TAG!");
-                return Err(i + 1);
-            };
-            // println!("ptr: {:?}, tag: {:?}", node.levels[i].load_decomposed().0, node.levels[i].load_decomposed().1);
 
             // Performs a compare_exchange, expecting the old value of the pointer to be the current
             // node. If it is not, we cannot make any reasonable progress, so we search again.
@@ -304,14 +236,8 @@ where
                 node.as_ptr(),
                 new_next,
             ) {
-                let _ = prev.levels[i].compare_exchange_with_tag(node.as_ptr(), 2, node.as_ptr(), 0);
-                // println!("error unlinking at swap; expected: {:?}, actual: {:?}, tag: {}", node.as_ptr(), _other, _tag);
                 return Err(i + 1);
             }
-
-            if let Err(_) = node.levels[i].compare_exchange_with_tag(new_next, 1, new_next, 2) {
-                // println!("FAILED to TAG with 2!");
-            };
         }
 
         Ok(())
@@ -324,24 +250,23 @@ where
     /// 1. `prev`, `curr`, are protected accesses.
     #[allow(unused)]
     unsafe fn unlink_level<'a>(
-        prev: NodeRef<'a, K, V>,
+        &'a self,
+        prev: &NodeRef<'a, K, V>,
         curr: NodeRef<'a, K, V>,
-        next: NodeRef<'a, K, V>,
+        next: Option<NodeRef<'a, K, V>>,
         level: usize,
-    ) -> Result<NodeRef<'a, K, V>, ()> {
+    ) -> Result<Option<NodeRef<'a, K, V>>, ()> {
         // The pointer to `next` is tagged to signal unlinking. 
-        curr.levels[level]
-            .try_tag(next.as_ptr(), 1)
-            .and(prev.levels[level].compare_exchange(
-                    curr.as_ptr(), 
-                    next.as_ptr()
-                )
-                .map(|s| s.0)
-                .map_err(|e| e.0)
-            )
-            .and(curr.levels[level].try_tag(next.as_ptr(), 2))
-            .map(|s| next)
-            .map_err(|e| ())
+        let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
+
+        if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
+            if curr.sub_ref() == 0 {
+                self.retire_node(curr.as_ptr());
+            }
+            Ok(next)
+        } else {
+            Err(())
+        }
     }
 
     fn retire_node(&self, node_ptr: *mut Node<K, V>) {
@@ -392,56 +317,37 @@ where
             //     1.2 If we the `next` node is less or equal but removed and removed nodes are
             //       disallowed, then we set our current node to the next node.
             while level > 0 {
-                let next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
-
-            /*
+                let mut next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
                 unsafe {
-                    next.as_ref().map(|n| println!(
-                            "accessing next: {:?}({}), from: {:?}({}) at level: {}, while searching for {}", 
-                            n.as_ptr(),
-                            (*(n.as_ptr() as *mut Node<u8, ()>)).key, 
-                            curr.as_ptr(),
-                            (*(curr.as_ptr() as *mut Node<u8, ()>)).key, 
-                            level - 1,
-                            *(key as *const _ as *const u8)
-                    ));
+                    next = if let Some(next) = next {
+                        if next.levels[level - 1].load_tag() == 1 {
+                            let new_next = NodeRef::from_maybe_tagged(&next.levels[level - 1]);
+                            let Ok(next) = self.unlink_level(&curr, next, new_next, level - 1) else {
+                                continue '_search;
+                            };
+
+                            next
+                        } else {
+                            Some(next)
+                        }
+                    } else {
+                        None
+                    }
                 }
-                        "accessing next: {:?}, from: {:?} at level: {}, while searching for {}", 
-                        (*(*n as *mut Node<u8, ()>)).key, 
-                        (*(curr as *mut Node<u8, ()>)).key, 
-                        level - 1,
-                        *(&key as *const _ as *const u8)
-                */
 
                 match next {
                     Some(next) 
                         // This check should ensure that we always get a non-removed node, if there
                         // is one, of our target key, as long as allow removed is set to false.
                         if (*next).key < *key || ((*next).key == *key && !(*next).removed() && search_removed) => {
+
                         // If the current node is being removed, we try to help unlinking it at this level.
-                        /*
-                        if (*curr).removed() {
-                            if let Err(_) = Self::unlink_level(prev[level - 1].0.as_ptr(), curr, next, level - 1) {
-                                continue 'search;
-                            }
-                            println!("successfully unlinked at level");
-                        }
-                        */
-                        
                         // Update previous_nodes.
                         prev[level - 1] = (curr, Some(next.clone()));
 
                         curr = next;
                     },
                     next => {
-                        /*
-                        if (*curr).removed() {
-                            if let Err(_) = Self::unlink_level(prev[level - 1].0.as_ptr(), curr, next, level - 1) {
-                                continue 'search;
-                            }
-                            println!("helped unlink at level");
-                        }
-                        */
                         // Update previous_nodes.
                         prev[level - 1] = (curr.clone(), next);
 
