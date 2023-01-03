@@ -422,6 +422,32 @@ where
             return Some(Entry::from(curr))
         }
     }
+
+    fn next_node<'a>(&'a self, node: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
+        let node: &NodeRef<'_, _, _> = unsafe { core::mem::transmute(node) };
+        let mut next = NodeRef::from_maybe_tagged(&node.levels[0])?;
+        
+        while next.levels[0].load_tag() == 1 {
+            let new = NodeRef::from_maybe_tagged(&next.levels[0]);
+            next = unsafe {
+                self.unlink_level(&node, next, new, 0).ok()??
+            };
+        }
+
+        Some(next.into())
+    }
+
+    fn traverse_with<F>(&self, mut f: F) where F: FnMut(&K, &V) {
+        let mut curr = self.get_first();
+
+        while let Some(c) = curr {
+            let k = c.key();
+            let v = c.val();
+            f(&k, &v);
+
+            curr = self.next_node(&c);
+        }
+    }
 }
 
 impl<'domain, K, V> Default for SkipList<'domain, K, V>
@@ -501,7 +527,7 @@ pub struct Entry<'a, K: 'a, V: 'a> {
     _hazard: haphazard::HazardPointer<'a, Global>,
 }
 
-impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
+impl<'a, K, V> Entry<'a, K, V> {
     fn val(&self) -> &V {
         // #Safety
         //
@@ -514,6 +540,16 @@ impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
         //
         // Our `HazardPointer` ensures that our pointers is valid.
         unsafe { &self.node.as_ref().key }
+    }
+}
+
+impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
+    fn val(&self) -> &V {
+        self.val()
+    }
+
+    fn key(&self) -> &K {
+        self.key()
     }
 }
 
@@ -614,12 +650,7 @@ where
 
 impl<'a, K, V> From<NodeRef<'a, K, V>> for Entry<'a, K, V> {
     fn from(value: NodeRef<'a, K, V>) -> Self {
-        let NodeRef {
-            node,
-            _hazard
-        } = value;
-
-        Entry { node, _hazard }
+        unsafe { core::mem::transmute(value) }
     }
 }
 
@@ -935,10 +966,8 @@ mod sync_test {
 
         list.insert(5, ());
 
-        unsafe {
-            assert!(list.find(&3, false).target.is_some());
-            assert!(list.find(&4, false).target.is_some());
-        }
+        assert!(list.find(&3, false).target.is_some());
+        assert!(list.find(&4, false).target.is_some());
 
         // manually get reference to the nodes
         let node_3 = unsafe { &mut (*(*list.head.as_ptr()).levels[0].load_ptr()) };
@@ -960,13 +989,11 @@ mod sync_test {
         // remove the node logically
         node_4.set_removed();
 
-        unsafe {
-            assert!(list.find(&4, false).target.is_none());
+        assert!(list.find(&4, false).target.is_none());
 
-            assert!(list.find(&4, true).target.is_some());
+        assert!(list.find(&4, true).target.is_some());
 
-            println!("{:?}", list.find(&3, false));
-        }
+        println!("{:?}", list.find(&3, false));
 
         assert!(!node_3.removed());
 
@@ -1013,13 +1040,7 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        unsafe {
-            let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
-            while !node.is_null() {
-                println!("{:?}", *node);
-                node = (*node).levels[0].load_ptr();
-            }
-        }
+        list.traverse_with(|k, _| println!("key: {}", k));
     }
 
     #[test]
@@ -1045,13 +1066,7 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        unsafe {
-            let mut node = (*list.head.as_ptr()).levels[0].load_ptr();
-            while !node.is_null() {
-                println!("{:?} - {:?}", node, *node);
-                node = (*node).levels[0].load_ptr();
-            }
-        }
+        list.traverse_with(|k, _| println!("key: {}", k));
     }
 
     #[test]
@@ -1080,12 +1095,6 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        unsafe {
-            let mut node = NodeRef::from_maybe_tagged(&list.head.as_ref().levels[0]);
-            while let Some(next) = node {
-                println!("{:?} - {:?}", next.as_ptr(), *next);
-                node = NodeRef::from_maybe_tagged(&next.levels[0]);
-            }
-        }
+        list.traverse_with(|k, _| println!("key: {}", k));
     }
 }

@@ -367,3 +367,123 @@ fn remove_crossbeam(b: &mut Bencher) {
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
     );
 }
+
+#[bench]
+fn inmove_skippy(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let mut seed2: u8 = rand::random();
+    let list: SkipList<CountOnCmp<u16>, u8> = SkipList::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            seed2 ^= seed2 << 3;
+            seed2 ^= seed2 >> 5;
+            seed2 ^= seed2 << 2;
+            if seed2 % 5 == 0 {
+                list.remove(&CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                });
+            } else {
+                list.insert(
+                    CountOnCmp {
+                        key: seed,
+                        counter: counter.clone(),
+                    },
+                    0,
+                );
+            }
+        }
+    });
+
+    println!(
+        "cmp count for inmove skippy: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}
+
+#[bench]
+fn inmove_skippy_sync(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let mut seed2: u8 = rand::random();
+    let list = SSkipList::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            seed2 ^= seed2 << 3;
+            seed2 ^= seed2 >> 5;
+            seed2 ^= seed2 << 2;
+            if seed2 % 5 == 0 {
+                list.remove(&CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                });
+            } else {
+                list.insert(
+                    CountOnCmp {
+                        key: seed,
+                        counter: counter.clone(),
+                    },
+                    0,
+                );
+            }
+        }
+    });
+
+    println!(
+        "cmp count for inmove skippy_sync: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}
+
+#[bench]
+fn inmove_crossbeam(b: &mut Bencher) {
+    let upper = test::black_box(1_000);
+    let mut seed: u16 = rand::random();
+    let mut seed2: u8 = rand::random();
+    let list = SkipMap::new();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    b.iter(|| {
+        for _ in 0..upper {
+            seed ^= seed << 6;
+            seed ^= seed >> 11;
+            seed ^= seed << 5;
+            seed2 ^= seed2 << 3;
+            seed2 ^= seed2 >> 5;
+            seed2 ^= seed2 << 2;
+            if seed2 % 5 == 0 {
+                list.remove(&CountOnCmp {
+                    key: seed,
+                    counter: counter.clone(),
+                });
+            } else {
+                list.insert(
+                    CountOnCmp {
+                        key: seed,
+                        counter: counter.clone(),
+                    },
+                    0,
+                );
+            }
+        }
+    });
+
+    println!(
+        "cmp count for inmove crossbeam: {}m",
+        counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000
+    );
+}

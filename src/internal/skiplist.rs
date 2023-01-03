@@ -97,6 +97,16 @@ where
         }
     }
 
+    unsafe fn unlink_level(
+        prev: *mut Node<K, V>,
+        curr: *mut Node<K, V>,
+        level: usize,
+    ) -> *mut Node<K, V> {
+        let next = (*curr).levels[level].load_ptr();
+        (*prev).levels[level].store_ptr(next);
+        next
+    }
+
     /// This method is `unsafe` as it may return the head typecast as a Node, which can
     /// cause UB if not handled appropriately. If the return value is Ok(...) then it is a
     /// regular Node. If it is Err(...) then it is the head.
@@ -116,13 +126,17 @@ where
 
         unsafe {
             while level > 0 {
-                if (*curr).levels[level - 1].load_ptr().is_null()
-                    || (*(*curr).levels[level - 1].load_ptr()).key >= *key
-                {
+                let mut next = (*curr).levels[level - 1].load_ptr();
+
+                if !next.is_null() && (*next).levels[level - 1].load_tag() == 1 {
+                    next = Self::unlink_level(curr, next, level - 1);
+                }
+
+                if next.is_null() || (*next).key >= *key {
                     prev[level - 1] = &(*curr).levels;
                     level -= 1;
                 } else {
-                    curr = (*curr).levels[level - 1].load_ptr()
+                    curr = next;
                 }
             }
         }
@@ -204,6 +218,26 @@ where
                 key: &curr.key,
                 val: &curr.val,
             })
+        }
+    }
+
+    fn traverse_with<F>(&self, mut f: F)
+    where
+        F: FnMut(&K, &V),
+    {
+        let mut curr = unsafe { self.head.as_ref().levels[0].load_ptr() };
+
+        unsafe {
+            while !curr.is_null() {
+                if !(*curr).removed() {
+                    let key = &(*curr).key;
+                    let val = &(*curr).val;
+
+                    f(key, val);
+                }
+
+                curr = (*curr).levels[0].load_ptr();
+            }
         }
     }
 }
@@ -524,5 +558,21 @@ mod test {
         }
 
         assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_traverse() {
+        let list = SkipList::new();
+        for _ in 0..100 {
+            list.insert(rand::random::<u8>(), ());
+        }
+
+        let mut prev = list.get_first().unwrap().key.clone();
+
+        list.traverse_with(|k, _| {
+            println!("key: {:?}", k);
+            assert!(*k >= prev);
+            prev = k.clone();
+        })
     }
 }
