@@ -1,4 +1,5 @@
 use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
+use std::marker::PhantomData;
 
 use crate::{
     internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
@@ -13,7 +14,11 @@ where
     V: Sync,
 {
     /// Inserts a value in the list given a key.
-    pub fn insert(&self, key: K, mut val: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, val: V) -> Option<V> {
+        self.internal_insert(key, val)
+    }
+
+    fn internal_insert(&self, key: K, mut val: V) -> Option<V> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         unsafe {
@@ -163,10 +168,7 @@ where
             match self.find(key) {
                 SearchResult {
                     target: Some(ptr), ..
-                } => Some(Entry {
-                    key: &ptr.as_ref().key,
-                    val: &ptr.as_ref().val,
-                }),
+                } => Some(Entry { node: ptr.as_ref() }),
                 _ => None,
             }
         }
@@ -176,49 +178,48 @@ where
         std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
+    fn next_node<'a>(&self, entry: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
+        let node = entry.node;
+
+        if node.levels[0].load_tag() == 1 {
+            return None;
+        }
+
+        let mut next = node.levels[0].load_ptr();
+
+        unsafe {
+            while !next.is_null() && (*next).levels[0].load_tag() == 1 {
+                next = Self::unlink_level(node as *const _ as *mut Node<K, V>, next, 0);
+            }
+        }
+
+        if next.is_null() {
+            return None;
+        }
+
+        unsafe { Some(Entry { node: &(*next) }) }
+    }
+
     pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
 
-        let first = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
-
         unsafe {
-            if !first.is_null() {
-                let first = &(*first);
-                return Some(Entry {
-                    key: &first.key,
-                    val: &first.val,
-                });
-            }
+            self.next_node(&Entry {
+                node: &(*self.head.as_ptr().cast()),
+            })
         }
-
-        None
     }
 
     pub fn get_last<'a>(&self) -> Option<Entry<'a, K, V>> {
-        if self.is_empty() {
-            return None;
+        let mut curr = self.get_first()?;
+
+        while let Some(next) = self.next_node(&curr) {
+            curr = next;
         }
 
-        let curr = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
-
-        unsafe {
-            if curr.is_null() {
-                return None;
-            }
-
-            let mut curr = &(*curr);
-
-            while !curr.levels[0].load_ptr().is_null() {
-                curr = &(*curr.levels[0].load_ptr());
-            }
-
-            Some(Entry {
-                key: &curr.key,
-                val: &curr.val,
-            })
-        }
+        Some(curr)
     }
 
     fn traverse_with<F>(&self, mut f: F)
@@ -264,7 +265,7 @@ where
     }
 
     fn insert(&self, key: K, value: V) -> Option<V> {
-        self.insert(key, value)
+        self.internal_insert(key, value)
     }
 
     fn remove(&self, key: &K) -> Option<(K, V)> {
@@ -289,29 +290,38 @@ where
 }
 
 pub struct Entry<'a, K, V> {
-    key: &'a K,
-    val: &'a V,
+    node: &'a Node<K, V>,
+}
+
+impl<'a, K, V> Entry<'a, K, V> {
+    fn val(&self) -> &V {
+        &self.node.val
+    }
+
+    fn key(&self) -> &K {
+        &self.node.key
+    }
 }
 
 impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
     fn val(&self) -> &V {
-        &self.val
+        &self.val()
     }
 
     fn key(&self) -> &K {
-        &self.key
+        &self.key()
     }
 }
 
 impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
     fn borrow(&self) -> &K {
-        self.key
+        self.key()
     }
 }
 
 impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
     fn as_ref(&self) -> &V {
-        self.val
+        self.val()
     }
 }
 
@@ -349,7 +359,7 @@ mod test {
 
     #[test]
     fn test_insert() {
-        let list = SkipList::new();
+        let mut list = SkipList::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..100_000 {
@@ -381,7 +391,7 @@ mod test {
 
     #[test]
     fn test_insert_verbose() {
-        let list = SkipList::new();
+        let mut list = SkipList::new();
 
         list.insert(1, 1);
         unsafe {
@@ -456,7 +466,7 @@ mod test {
 
     #[test]
     fn test_remove() {
-        let list = SkipList::new();
+        let mut list = SkipList::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..100_000 {
@@ -475,7 +485,7 @@ mod test {
 
     #[test]
     fn test_verbose_remove() {
-        let list = SkipList::new();
+        let mut list = SkipList::new();
 
         list.insert(1, 1);
         list.insert(2, 2);
@@ -562,17 +572,29 @@ mod test {
 
     #[test]
     fn test_traverse() {
-        let list = SkipList::new();
+        let mut list = SkipList::new();
         for _ in 0..100 {
             list.insert(rand::random::<u8>(), ());
         }
 
-        let mut prev = list.get_first().unwrap().key.clone();
+        let mut prev = list.get_first().unwrap().key().clone();
 
         list.traverse_with(|k, _| {
             println!("key: {:?}", k);
             assert!(*k >= prev);
             prev = k.clone();
         })
+    }
+
+    #[test]
+    fn test_get_last() {
+        let mut list = SkipList::new();
+        for _ in 0..100 {
+            list.insert(rand::random::<u8>(), ());
+        }
+
+        assert!(list.get_last().is_some());
+
+        println!("{}", list.get_last().unwrap().key())
     }
 }
