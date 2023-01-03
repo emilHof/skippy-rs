@@ -382,51 +382,17 @@ where
         std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
-    pub fn get_first<'a>(&'a self) -> Option<Entry<'a, K, V>> {
-        if self.is_empty() {
-            return None;
-        }
-
-        let mut curr = unsafe {
-            NodeRef::from_ptr(self.head.as_ref().levels[0].as_std())?
-        };
-
-        while let Some(next) = NodeRef::from_maybe_tagged(&curr.levels[0]) {
-            curr = next;
-
-            if !curr.removed() {
-                return Some(Entry::from(curr));
-            }
-        }
-
-        None
-    }
-
-    pub fn get_last<'a>(&'a self) -> Option<Entry<'a, K, V>> {
-        if self.is_empty() {
-            return None;
-        }
-
-        'last: loop {
-            let mut curr =
-                unsafe { NodeRef::from_maybe_tagged(&self.head.as_ref().levels[0])? };
-
-            while let Some(next) = NodeRef::from_maybe_tagged(&curr.levels[0]) {
-                curr = next;
-            }
-
-            if curr.removed() {
-                continue 'last;
-            }
-
-            return Some(Entry::from(curr))
-        }
-    }
-
     fn next_node<'a>(&'a self, node: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
         let node: &NodeRef<'_, _, _> = unsafe { core::mem::transmute(node) };
+
+        // This means we have a stale node and cannot return a sane answer!
+        if node.levels[0].load_tag() == 1 {
+            return None
+        };
+
         let mut next = NodeRef::from_maybe_tagged(&node.levels[0])?;
         
+        // Unlink and skip all removed `Node`s we may encounter.
         while next.levels[0].load_tag() == 1 {
             let new = NodeRef::from_maybe_tagged(&next.levels[0]);
             next = unsafe {
@@ -435,6 +401,26 @@ where
         }
 
         Some(next.into())
+    }
+
+    pub fn get_first<'a>(&'a self) -> Option<Entry<'a, K, V>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let curr = NodeRef::from_raw(self.head.as_ptr().cast::<Node<K, V>>());
+
+        self.next_node(&curr.into())
+    }
+
+    pub fn get_last<'a>(&'a self) -> Option<Entry<'a, K, V>> {
+        let mut curr = self.get_first()?;
+
+        while let Some(next) = self.next_node(&curr) {
+            curr = next;
+        }
+
+        return Some(curr.into())
     }
 
     fn traverse_with<F>(&self, mut f: F) where F: FnMut(&K, &V) {
