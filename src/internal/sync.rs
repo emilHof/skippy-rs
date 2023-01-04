@@ -279,7 +279,7 @@ where
         }
     }
 
-    fn find<'a>(&'a self, key: &K, search_removed: bool) -> SearchResult<'a, K, V> {
+    fn find<'a>(&'a self, key: &K, search_closest: bool) -> SearchResult<'a, K, V> {
         let head = unsafe { &(*self.head.as_ptr()) };
 
         let mut prev = unsafe {
@@ -317,29 +317,37 @@ where
             //     1.2 If we the `next` node is less or equal but removed and removed nodes are
             //       disallowed, then we set our current node to the next node.
             while level > 0 {
-                let mut next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
-                unsafe {
-                    next = if let Some(next) = next {
-                        if next.levels[level - 1].load_tag() == 1 {
-                            let new_next = NodeRef::from_maybe_tagged(&next.levels[level - 1]);
-                            let Ok(next) = self.unlink_level(&curr, next, new_next, level - 1) else {
-                                continue '_search;
-                            };
-
-                            next
-                        } else {
-                            Some(next)
+                let next = unsafe {
+                    let mut next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
+                    loop {
+                        if next.is_none() {
+                            break next;
                         }
-                    } else {
-                        None
+
+                        if let Some(n) = next.as_ref() {
+                            if n.levels[level - 1].load_tag() == 0 {
+                                break next;
+                            }
+                        }
+
+                        let n = next.unwrap();
+
+                        let new_next = NodeRef::from_maybe_tagged(&n.levels[level - 1]);
+
+                        let Ok(n) = self.unlink_level(&curr, n, new_next, level - 1) else {
+                            continue '_search;
+                        };
+
+                        next = n
+
                     }
-                }
+                };
 
                 match next {
                     Some(next) 
                         // This check should ensure that we always get a non-removed node, if there
                         // is one, of our target key, as long as allow removed is set to false.
-                        if (*next).key < *key || ((*next).key == *key && !(*next).removed() && search_removed) => {
+                        if (*next).key < *key => {
 
                         // If the current node is being removed, we try to help unlinking it at this level.
                         // Update previous_nodes.
@@ -356,9 +364,38 @@ where
                 }
             }
 
-            return match NodeRef::from_maybe_tagged(&prev[0].0.as_ref().levels[0]) {
-                Some(next) if next.key == *key && (search_removed || !next.removed()) => SearchResult { prev, target: Some(next) },
-                _ => SearchResult { prev, target: None }
+            unsafe {
+                return if search_closest {
+                    let mut next = NodeRef::from_maybe_tagged(&curr.levels[level - 1]);
+                    loop {
+                        if next.is_none() {
+                            break;
+                        }
+
+                        if let Some(n) = next.as_ref() {
+                            if n.levels[level - 1].load_tag() == 0 {
+                                break;
+                            }
+                        }
+
+                        let n = next.unwrap();
+
+                        let new_next = NodeRef::from_maybe_tagged(&n.levels[level - 1]);
+
+                        let Ok(n) = self.unlink_level(&curr, n, new_next, level - 1) else {
+                            continue '_search;
+                        };
+
+                        next = n
+                    }
+
+                    SearchResult { prev, target: next }
+                } else {
+                    return match NodeRef::from_maybe_tagged(&prev[0].0.as_ref().levels[0]) {
+                        Some(next) if next.key == *key && !next.removed() => SearchResult { prev, target: Some(next) },
+                        _ => SearchResult { prev, target: None }
+                    }
+                }
             }
         }
     }
@@ -387,7 +424,7 @@ where
 
         // This means we have a stale node and cannot return a sane answer!
         if node.levels[0].load_tag() == 1 {
-            return None
+            return self.find(&node.key, true).target.map(|t| t.into())
         };
 
         let mut next = NodeRef::from_maybe_tagged(&node.levels[0])?;
@@ -396,7 +433,7 @@ where
         while next.levels[0].load_tag() == 1 {
             let new = NodeRef::from_maybe_tagged(&next.levels[0]);
             next = unsafe {
-                self.unlink_level(&node, next, new, 0).ok()??
+                self.unlink_level(&node, next, new, 0).ok().unwrap_or_else(|| self.find(&node.key, true).target)?
             };
         }
 
@@ -514,18 +551,34 @@ pub struct Entry<'a, K: 'a, V: 'a> {
 }
 
 impl<'a, K, V> Entry<'a, K, V> {
-    fn val(&self) -> &V {
+    pub fn val(&self) -> &V {
         // #Safety
         //
         // Our `HazardPointer` ensures that our pointers is valid.
         unsafe { &self.node.as_ref().val }
     }
 
-    fn key(&self) -> &K {
+    pub fn key(&self) -> &K {
         // #Safety
         //
         // Our `HazardPointer` ensures that our pointers is valid.
         unsafe { &self.node.as_ref().key }
+    }
+
+    pub fn remove(self) -> Option<(K, V)> {
+        unsafe {
+            self.node.as_ref().set_removed().ok()?;
+
+            let (key, val) = (
+                core::ptr::read(&self.node.as_ref().key),
+                core::ptr::read(&self.node.as_ref().val),
+            );
+
+            self.node.as_ref().tag_levels(1).expect("no tags to exists");
+
+            (key, val).into()
+            
+        }
     }
 }
 

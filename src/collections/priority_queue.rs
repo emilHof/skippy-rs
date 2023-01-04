@@ -1,65 +1,72 @@
 use crate::internal::skiplist;
+use crate::internal::skiplist::SkipList;
 use crate::internal::sync;
-use crate::skiplist::Entry;
-use std::marker::PhantomData;
+use crate::internal::sync::SkipList as SyncSkipList;
 
 /// [PriorityQueue](PriorityQueue) is implemented using a [SkipList](crate::skiplist::SkipList) and is available as both
 /// a non-thread safe, but faster, and a thread-safe, yet slower, variation.
-pub struct PriorityQueue<V, L> {
+pub struct PriorityQueue<L> {
     queue: L,
-    _phantom: PhantomData<V>,
 }
 
-impl<'domain, V> PriorityQueue<V, ()>
-where
-    V: Sync,
-{
-    pub fn new() -> PriorityQueue<V, skiplist::SkipList<'domain, V, ()>> {
+impl<'domain> PriorityQueue<()> {
+    pub fn new<V: Sync>() -> PriorityQueue<SkipList<'domain, V, ()>> {
         PriorityQueue {
-            queue: skiplist::SkipList::new(),
-            _phantom: PhantomData,
+            queue: SkipList::new(),
         }
     }
-    pub fn new_sync() -> PriorityQueue<V, sync::SkipList<'domain, V, ()>> {
+    pub fn new_sync<V: Sync>() -> PriorityQueue<SyncSkipList<'domain, V, ()>> {
         PriorityQueue {
-            queue: sync::SkipList::new(),
-            _phantom: PhantomData,
+            queue: SyncSkipList::new(),
         }
     }
 }
 
-unsafe impl<V, L> Send for PriorityQueue<V, L>
+unsafe impl<L> Send for PriorityQueue<L> where L: Send + Sync {}
+
+unsafe impl<L> Sync for PriorityQueue<L> where L: Send + Sync {}
+
+impl<'a, V> PriorityQueue<SkipList<'a, V, ()>>
 where
-    V: Send + Sync,
-    L: Send + Sync,
+    V: Ord,
 {
+    pub fn push(&mut self, value: V) {
+        self.queue.insert_adjacent(value, ());
+    }
+
+    pub fn peek(&'a self) -> Option<&V> {
+        self.queue.get_first()?.key().into()
+    }
+
+    pub fn pop(&mut self) -> Option<V> {
+        self.queue.remove_first().map(|(v, ..)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
-unsafe impl<V, L> Sync for PriorityQueue<V, L>
+impl<'a, V> PriorityQueue<SyncSkipList<'a, V, ()>>
 where
-    V: Send + Sync,
-    L: Send + Sync,
-{
-}
-
-impl<'a, V, L> PriorityQueue<V, L>
-where
-    L: crate::skiplist::SkipList<V, ()> + 'a,
-    V: Ord + 'a,
+    V: Ord + Send + Sync + 'a,
 {
     pub fn push(&self, value: V) {
         self.queue.insert(value, ());
     }
 
-    pub fn peek(&'a self) -> Option<L::Entry<'a>> {
-        self.queue.front()
+    pub fn peek(&'a self) -> Option<sync::Entry<'a, V, ()>> {
+        self.queue.get_first()
     }
 
     pub fn pop(&'a self) -> Option<V> {
-        match self.queue.front() {
-            Some(e) => self.queue.remove(e.key()).map(|(v, _)| v),
-            None => None,
-        }
+        let first = self.queue.get_first()?;
+
+        first.remove().map(|(v, _)| v)
     }
 
     pub fn len(&self) -> usize {
@@ -79,7 +86,7 @@ mod pq_test {
 
     #[test]
     fn test_push() {
-        let queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..10_000 {
@@ -91,7 +98,7 @@ mod pq_test {
 
     #[test]
     fn test_pop() {
-        let queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new();
         let mut rng: u16 = rand::random();
 
         for _ in 0..10_000 {
@@ -113,7 +120,7 @@ mod pq_test {
     fn test_push_pop() {
         let n = 1_000;
         let mut seed: u32 = rand::random();
-        let queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new();
 
         for _ in 0..n {
             seed ^= seed << 13;
@@ -135,9 +142,10 @@ mod pq_test {
 
     #[test]
     fn test_with_std() {
+        use std::cmp::Reverse;
         let n = 100_000;
         let mut seed: u8 = rand::random();
-        let queue = PriorityQueue::new();
+        let mut queue = PriorityQueue::new();
         let mut sq = BinaryHeap::new();
 
         for _ in 0..n {
@@ -147,10 +155,10 @@ mod pq_test {
 
             match seed % 5 {
                 0 => {
-                    assert_eq!(sq.pop(), queue.pop());
+                    assert_eq!(sq.pop().map(|r: Reverse<u8>| r.0), queue.pop());
                 }
                 _ => {
-                    sq.push(seed);
+                    sq.push(Reverse(seed));
                     queue.push(seed);
                 }
             }

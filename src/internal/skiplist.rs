@@ -1,24 +1,23 @@
-use core::{borrow::Borrow, marker::Sync, ptr::NonNull, sync::atomic::Ordering};
-use std::marker::PhantomData;
+use core::{ptr::NonNull, sync::atomic::Ordering};
 
-use crate::{
-    internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT},
-    skiplist,
-};
+use crate::internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT};
 
 skiplist_basics!(SkipList);
 
 impl<'domain, K, V> SkipList<'domain, K, V>
 where
-    K: Ord + Sync,
-    V: Sync,
+    K: Ord,
 {
     /// Inserts a value in the list given a key.
     pub fn insert(&mut self, key: K, val: V) -> Option<V> {
-        self.internal_insert(key, val)
+        self.internal_insert(key, val, true)
     }
 
-    fn internal_insert(&self, key: K, mut val: V) -> Option<V> {
+    pub fn insert_adjacent(&mut self, key: K, val: V) -> Option<V> {
+        self.internal_insert(key, val, false)
+    }
+
+    fn internal_insert(&self, key: K, mut val: V, replace: bool) -> Option<V> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         unsafe {
@@ -28,7 +27,7 @@ where
                 SearchResult {
                     target: Some(target),
                     ..
-                } => {
+                } if replace => {
                     std::mem::swap(&mut (*target.as_ptr()).val, &mut val);
                     Some(val)
                 }
@@ -59,11 +58,27 @@ where
             unsafe {
                 (*new_node).levels[i].store_ptr(levels[i].load_ptr());
                 levels[i].store_ptr(new_node);
+                (*new_node).add_ref();
             }
         }
     }
 
-    pub fn remove(&self, key: &K) -> Option<(K, V)> {
+    pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
+        self.internal_remove(key)
+    }
+
+    pub fn remove_first(&mut self) -> Option<(K, V)> {
+        if self.is_empty() {
+            return None;
+        }
+
+        unsafe {
+            let key = &(*self.head.as_ref().levels[0].load_ptr()).key;
+            self.internal_remove(key)
+        }
+    }
+
+    fn internal_remove(&self, key: &K) -> Option<(K, V)> {
         if self.is_empty() {
             return None;
         }
@@ -108,6 +123,11 @@ where
         level: usize,
     ) -> *mut Node<K, V> {
         let next = (*curr).levels[level].load_ptr();
+
+        if (*curr).sub_ref() == 0 {
+            Node::<K, V>::dealloc(curr);
+        }
+
         (*prev).levels[level].store_ptr(next);
         next
     }
@@ -158,7 +178,7 @@ where
         }
     }
 
-    pub fn get<'a>(&self, key: &K) -> Option<Entry<'a, K, V>> {
+    pub fn get<'a>(&'a self, key: &K) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
@@ -178,7 +198,7 @@ where
         std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
-    fn next_node<'a>(&self, entry: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
+    fn next_node<'a>(&'a self, entry: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
         let node = entry.node;
 
         if node.levels[0].load_tag() == 1 {
@@ -200,7 +220,7 @@ where
         unsafe { Some(Entry { node: &(*next) }) }
     }
 
-    pub fn get_first<'a>(&self) -> Option<Entry<'a, K, V>> {
+    pub fn get_first<'a>(&'a self) -> Option<Entry<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
@@ -212,7 +232,7 @@ where
         }
     }
 
-    pub fn get_last<'a>(&self) -> Option<Entry<'a, K, V>> {
+    pub fn get_last<'a>(&'a self) -> Option<Entry<'a, K, V>> {
         let mut curr = self.get_first()?;
 
         while let Some(next) = self.next_node(&curr) {
@@ -241,51 +261,26 @@ where
             }
         }
     }
-}
 
-impl<'domain, K, V> Default for SkipList<'domain, K, V>
-where
-    K: Sync,
-    V: Sync,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
+    pub fn entry<'a: 'domain>(&'a mut self, key: K) -> Option<MutEntry<'a, K, V>> {
+        if self.is_empty() {
+            return None;
+        }
 
-impl<'domain, K, V> skiplist::SkipList<K, V> for SkipList<'domain, K, V>
-where
-    K: Ord + Sync,
-    V: Sync,
-{
-    type Entry<'a> = Entry<'a, K, V> where  Self: 'a;
-
-    fn new() -> Self {
-        SkipList::new()
-    }
-
-    fn insert(&self, key: K, value: V) -> Option<V> {
-        self.internal_insert(key, value)
-    }
-
-    fn remove(&self, key: &K) -> Option<(K, V)> {
-        self.remove(key)
-    }
-
-    fn get<'a>(&'a self, key: &K) -> Option<Self::Entry<'a>> {
-        self.get(key)
-    }
-
-    fn last<'a>(&'a self) -> Option<Self::Entry<'a>> {
-        self.get_first()
-    }
-
-    fn front<'a>(&'a self) -> Option<Self::Entry<'a>> {
-        self.get_last()
-    }
-
-    fn len(&self) -> usize {
-        self.len()
+        unsafe {
+            match self.find(&key) {
+                SearchResult {
+                    prev: _,
+                    target: Some(mut target),
+                } => MutEntry {
+                    node: target.as_mut(),
+                    list: self,
+                    key,
+                }
+                .into(),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -294,34 +289,34 @@ pub struct Entry<'a, K, V> {
 }
 
 impl<'a, K, V> Entry<'a, K, V> {
-    fn val(&self) -> &V {
+    pub fn val(&self) -> &'a V {
         &self.node.val
     }
 
-    fn key(&self) -> &K {
+    pub fn key(&self) -> &'a K {
         &self.node.key
     }
 }
 
-impl<'a, K, V> skiplist::Entry<'a, K, V> for Entry<'a, K, V> {
-    fn val(&self) -> &V {
-        &self.val()
+pub struct MutEntry<'a, K, V> {
+    list: &'a mut SkipList<'a, K, V>,
+    node: &'a mut Node<K, V>,
+    key: K,
+}
+
+impl<'a, K, V> MutEntry<'a, K, V> {
+    pub fn val(&self) -> &V {
+        &self.node.val
     }
 
-    fn key(&self) -> &K {
-        &self.key()
+    pub fn key(&self) -> &K {
+        &self.node.key
     }
 }
 
-impl<'a, K, V> Borrow<K> for Entry<'a, K, V> {
-    fn borrow(&self) -> &K {
-        self.key()
-    }
-}
-
-impl<'a, K, V> AsRef<V> for Entry<'a, K, V> {
-    fn as_ref(&self) -> &V {
-        self.val()
+impl<'a, K: Ord, V> MutEntry<'a, K, V> {
+    pub fn remove(self) -> Option<(K, V)> {
+        self.list.remove(&self.key)
     }
 }
 
