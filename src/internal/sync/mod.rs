@@ -54,6 +54,8 @@ where
         // assert!(new_node.set_build_begin().is_ok());
         //
 
+        self.state.len.fetch_add(1, Ordering::AcqRel);
+
         unsafe {
             while let Err(starting) =
                 self.link_nodes(&new_node, prev, starting_height)
@@ -68,6 +70,7 @@ where
                             // TODO Implement something like this in a concurrency-safe
                             // way!
                             self.retire_node(new_node.node.as_ptr());
+                            self.state.len.fetch_sub(1, Ordering::AcqRel);
 
                             return None;
                         }
@@ -78,8 +81,6 @@ where
         }
         // The node should still be in build stage!
         // assert!(new_node.set_build_done().is_ok());
-
-        self.state.len.fetch_add(1, Ordering::Relaxed);
 
         existing
     }
@@ -155,8 +156,6 @@ where
                 if target.set_removed().is_err() {
                     return None;
                 }
-
-                self.state.len.fetch_sub(1, Ordering::Relaxed);
 
                 // # Safety:
                 // 1. `key` and `val` will not be tempered with.
@@ -236,6 +235,7 @@ where
             }
         }
 
+        self.state.len.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -258,6 +258,7 @@ where
         if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
             if curr.sub_ref() == 0 {
                 self.retire_node(curr.as_ptr());
+                self.state.len.fetch_sub(1, Ordering::Relaxed);
             }
             Ok(next)
         } else {
@@ -429,7 +430,9 @@ where
         while next.levels[0].load_tag() == 1 {
             let new = NodeRef::from_maybe_tagged(&next.levels[0]);
             next = unsafe {
-                self.unlink_level(&node, next, new, 0).ok().unwrap_or_else(|| self.find(&node.key, true).target)?
+                self.unlink_level(&node, next, new, 0)
+                    .ok()
+                    .unwrap_or_else(|| self.find(&node.key, true).target)?
             };
         }
 
@@ -507,7 +510,6 @@ where
         unsafe { core::mem::transmute(list) }
     }
 }
-
 
 
 #[allow(dead_code)]
