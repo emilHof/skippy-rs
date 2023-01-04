@@ -161,18 +161,6 @@ impl<K, V> Node<K, V> {
         self.set_har_with(|old| old | REMOVED_MASK)
     }
 
-    pub(crate) fn build(&self) -> bool {
-        (self.height_and_removed.load(Ordering::SeqCst) & BUILD_MASK) >> 30 == 1
-    }
-
-    pub(crate) fn set_build_done(&self) -> Result<u32, ()> {
-        self.set_har_with(|old| old & !BUILD_MASK)
-    }
-
-    pub(crate) fn set_build_begin(&self) -> Result<u32, ()> {
-        self.set_har_with(|old| old | BUILD_MASK)
-    }
-
     fn set_har_with<F>(&self, f: F) -> Result<u32, ()>
     where
         F: Fn(u32) -> u32,
@@ -224,6 +212,16 @@ impl<K, V> Node<K, V> {
             }
         }
         Ok(self.height() - 1)
+    }
+
+    pub(crate) fn try_remove_and_tag(&self) -> Result<(K, V), ()> {
+        self.set_removed()?;
+
+        let kv = unsafe { (core::ptr::read(&self.key), core::ptr::read(&self.val)) };
+
+        self.tag_levels(1).map_err(|_| ())?;
+
+        Ok(kv)
     }
 }
 
@@ -297,23 +295,11 @@ mod node_test {
 
         assert!(node.removed());
 
-        assert!(node.set_build_begin().is_ok());
-
-        assert!(node.build());
-
         assert_eq!(node.height(), 3);
 
         node.set_height(2);
 
         assert_eq!(node.height(), 2);
-
-        assert!(node.build());
-
-        assert!(node.set_build_begin().is_err());
-
-        assert!(node.set_build_done().is_ok());
-
-        assert!(!node.build());
 
         assert_eq!(node.height(), 2);
     }
