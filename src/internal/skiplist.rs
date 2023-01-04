@@ -17,7 +17,7 @@ where
         self.internal_insert(key, val, false)
     }
 
-    fn internal_insert(&self, key: K, mut val: V, replace: bool) -> Option<V> {
+    fn internal_insert(&mut self, key: K, mut val: V, replace: bool) -> Option<V> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         unsafe {
@@ -78,7 +78,7 @@ where
         }
     }
 
-    fn internal_remove(&self, key: &K) -> Option<(K, V)> {
+    fn internal_remove(&mut self, key: &K) -> Option<(K, V)> {
         if self.is_empty() {
             return None;
         }
@@ -105,7 +105,7 @@ where
     }
 
     /// Logically removes the node from the list by linking its adjacent nodes to one-another.
-    fn unlink(&self, node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
+    fn unlink(&mut self, node: *mut Node<K, V>, prev: [&Levels<K, V>; HEIGHT]) {
         // safety check against UB caused by unlinking the head
         if self.is_head(node) {
             panic!()
@@ -135,7 +135,7 @@ where
     /// This method is `unsafe` as it may return the head typecast as a Node, which can
     /// cause UB if not handled appropriately. If the return value is Ok(...) then it is a
     /// regular Node. If it is Err(...) then it is the head.
-    unsafe fn find<'a>(&'a self, key: &K) -> SearchResult<'a, K, V> {
+    unsafe fn find<'a>(&self, key: &K) -> SearchResult<'a, K, V> {
         let mut level = self.state.max_height.load(Ordering::Relaxed);
         let head = unsafe { &(*self.head.as_ptr()) };
 

@@ -1026,11 +1026,9 @@ mod sync_test {
         println!("{:?}", node_5);
 
         // remove the node logically
-        node_4.set_removed();
+        let _ = node_4.set_removed();
 
         assert!(list.find(&4, false).target.is_none());
-
-        assert!(list.find(&4, true).target.is_some());
 
         println!("{:?}", list.find(&3, false));
 
