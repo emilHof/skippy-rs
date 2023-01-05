@@ -448,6 +448,8 @@ fn inmove_skippy_sync(b: &mut Bencher) {
         counter.load(std::sync::atomic::Ordering::Acquire) / 1_000_000,
         list.len()
     );
+
+    list.iter().for_each(|e| println!("key: {}", e.key().key));
 }
 
 #[bench]

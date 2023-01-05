@@ -9,7 +9,7 @@ impl<T> MaybeTagged<T> {
         self.load_decomposed().0
     }
     pub(crate) fn load_decomposed(&self) -> (*mut T, usize) {
-        let raw = unsafe { self.0.as_std().load(std::sync::atomic::Ordering::SeqCst) };
+        let raw = unsafe { self.0.as_std().load(std::sync::atomic::Ordering::Acquire) };
         Self::decompose_raw(raw)
     }
 
@@ -27,7 +27,7 @@ impl<T> MaybeTagged<T> {
         unsafe {
             self.0
                 .as_std()
-                .store(tagged, std::sync::atomic::Ordering::SeqCst);
+                .store(tagged, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -59,8 +59,8 @@ impl<T> MaybeTagged<T> {
             match self.0.as_std().compare_exchange(
                 Self::compose_raw(expected, e_tag),
                 Self::compose_raw(new, n_tag),
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
             ) {
                 Ok(new) => Ok(Self::decompose_raw(new)),
                 Err(other) => Err(Self::decompose_raw(other)),

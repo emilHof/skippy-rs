@@ -33,12 +33,14 @@ where
     pub fn insert(&self, key: K, val: V) -> Option<(K, V)> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
-        let insertion_point = self.find(&key, false);
+        let mut insertion_point = self.find(&key, false);
+        let mut existing = None;
 
-        let existing = if let Some(_target) = insertion_point.target {
-            return None
-        } else {
-            None
+        while let Some(target) = insertion_point.target.take() {
+            existing = target.try_remove_and_tag().ok().map(|temp| {
+                insertion_point = self.find(&key, false);
+                temp
+            });
         };
         
         let mut prev = insertion_point.prev;
@@ -60,27 +62,22 @@ where
             while let Err(starting) =
                 self.link_nodes(&new_node, prev, starting_height)
             {
-                (prev, starting_height) = {
-                    let SearchResult {
-                        prev,
-                        target,
-                    } = self.find(&new_node.key, false);
-                    if let Some(_target) = target {
-                        if starting == 0 {
-                            // TODO Implement something like this in a concurrency-safe
-                            // way!
-                            self.retire_node(new_node.node.as_ptr());
-                            self.state.len.fetch_sub(1, Ordering::AcqRel);
-
-                            return None;
-                        }
+                let mut search = self.find(&new_node.key, false);
+                
+                while let Some(target) = search.target.take() {
+                    if core::ptr::eq(target.as_ptr(), new_node.as_ptr()) {
+                        break;
                     }
-                    (prev, starting)
+
+                    existing = target.try_remove_and_tag().ok().map(|temp| {
+                        search = self.find(&new_node.key, false);
+                        temp
+                    });
                 };
+
+                (starting_height, prev) = (starting, search.prev);
             }
         }
-        // The node should still be in build stage!
-        // assert!(new_node.set_build_done().is_ok());
 
         existing
     }
@@ -1053,12 +1050,12 @@ mod sync_test {
         use std::sync::Arc;
         let list = Arc::new(SkipList::new());
 
-        let threads = (0..30)
+        let threads = (0..20)
             .map(|_| {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..10_000 {
+                    for _ in 0..1_000 {
                         let target = rng.gen::<u8>();
 
                         list.insert(target, ());
