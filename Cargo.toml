@@ -1,5 +1,5 @@
 [package]
-name = "skippy"
+name = "skippy-rs"
 version = "0.0.0-alpha.0"
 edition = "2021"
 authors = ["Emil Hofstetter <emil.k.hofstetter@gmail.com>"]
