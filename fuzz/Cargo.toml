@@ -9,8 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+afl = "*"
+rand = "*"
 
-[dependencies.skippy]
+[dependencies.skippy-rs]
 path = ".."
 
 # Prevent this from interfering with workspaces

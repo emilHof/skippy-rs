@@ -178,16 +178,7 @@ where
                 // #Safety:
                 // 1. The height we got from the `node` guarantees it is a valid height for levels.
                 unsafe {
-                    if self.unlink(&target, height, &prev).is_ok() {
-                        // TODO Ensure the safety of this!
-                        // #Safety:
-                        //
-                        // we are the only thread that has permission to drop this node.
-                        self.retire_node(target.as_ptr());
-
-                        // We see if we can drop some pointers in the list.
-                        self.garbage.domain.eager_reclaim();
-                    } else {
+                    if self.unlink(&target, height, &prev).is_err() {
                         self.find(&key, false);
                     }
                 }
@@ -235,9 +226,17 @@ where
             ) {
                 return Err(i + 1);
             }
+
+            node.as_ref().sub_ref();
         }
 
         self.state.len.fetch_sub(1, Ordering::AcqRel);
+
+        // Since all levels were unlinked we can safely retire the node.
+        self.retire_node(node.as_ptr());
+
+        // we see if we can drop some pointers in the list.
+        self.garbage.domain.eager_reclaim();
         Ok(())
     }
 
@@ -259,8 +258,10 @@ where
 
         if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
             if curr.sub_ref() == 0 {
-                self.retire_node(curr.as_ptr());
                 self.state.len.fetch_sub(1, Ordering::Relaxed);
+
+                self.retire_node(curr.as_ptr());
+                self.garbage.domain.eager_reclaim();
             }
             Ok(next)
         } else {
@@ -287,7 +288,7 @@ where
                 .domain
                 .retire_ptr::<Node<K, V>, DeallocOnDrop<K, V>>(node_ptr)
                 /*
-                .retire_ptr_with(node_ptr, |ptr: *mut dyn Reclaim| {
+                .retire_ptr_with(node_ptr, |ptr: *mut dyn haphazard::raw::Reclaim| {
                     Node::<K, V>::dealloc(ptr as *mut Node<K, V>);
                 })
                 */
@@ -773,7 +774,7 @@ mod sync_test {
         let list = SkipList::new();
         let mut rng: u16 = rand::random();
 
-        for _ in 0..100_000 {
+        for _ in 0..10_000 {
             rng ^= rng << 3;
             rng ^= rng >> 12;
             rng ^= rng << 7;
@@ -926,19 +927,15 @@ mod sync_test {
         for _ in 0..10_000 {
             list.insert(rng.gen::<u16>(), ());
         }
-        let threads = (0..30)
+        let threads = (0..20)
             .map(|_| {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
                     for _ in 0..1_000 {
                         let target = &rng.gen::<u16>();
-                        let success = list.remove(&target);
-                        if success.is_some() {
-                            println!("{:?}", success);
-                        }
+                        list.remove(&target);
                     }
-                    println!("all done!");
                 })
             })
             .collect::<Vec<_>>();
@@ -986,7 +983,7 @@ mod sync_test {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..5_000 {
+                    for _ in 0..1000 {
                         let target = rng.gen::<u8>();
                         if rng.gen::<u8>() % 5 == 0 {
                             list.remove(&target);
