@@ -1,5 +1,6 @@
 #![feature(test)]
 use crossbeam_skiplist::SkipSet;
+use rand::Rng;
 use skippy::collections::priority_queue::PriorityQueue;
 use std::collections::BinaryHeap;
 
@@ -140,4 +141,54 @@ fn bench_push_pop_crossbeam(b: &mut Bencher) {
     });
 
     println!("cb len: {}", queue.len());
+}
+
+#[bench]
+fn bench_push_crossbeam_threaded(b: &mut Bencher) {
+    let n = test::black_box(500);
+    let queue = std::sync::Arc::new(SkipSet::new());
+
+    b.iter(|| {
+        let threads = (0..10)
+            .map(|_| {
+                let queue = queue.clone();
+                std::thread::spawn(move || {
+                    let mut rng = rand::thread_rng();
+                    for _ in 0..n {
+                        let target = rng.gen::<u32>();
+                        queue.insert(target);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap()
+        }
+    });
+}
+
+#[bench]
+fn bench_push_skippy_threaded(b: &mut Bencher) {
+    let n = test::black_box(500);
+    let queue = std::sync::Arc::new(PriorityQueue::new_sync());
+
+    b.iter(|| {
+        let threads = (0..10)
+            .map(|_| {
+                let queue = queue.clone();
+                std::thread::spawn(move || {
+                    let mut rng = rand::thread_rng();
+                    for _ in 0..n {
+                        let target = rng.gen::<u32>();
+                        queue.push(target);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap()
+        }
+    });
 }

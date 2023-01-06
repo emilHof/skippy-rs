@@ -1,9 +1,10 @@
 extern crate alloc;
 
+use crate::internal::sync::tagged::MaybeTagged;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
-use haphazard::AtomicPtr;
 
 const REMOVED_MASK: u32 = (1 as u32) << 31;
+const BUILD_MASK: u32 = (1 as u32) << 30;
 
 use core::{
     fmt::Debug,
@@ -21,6 +22,7 @@ pub(crate) struct Head<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
     pub(crate) height_and_removed: AtomicU32,
+    pub(crate) refs: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -42,7 +44,7 @@ impl<K, V> Head<K, V> {
 
 #[repr(C)]
 pub(crate) struct Levels<K, V> {
-    pub(crate) pointers: [AtomicPtr<Node<K, V>>; 1],
+    pub(crate) pointers: [MaybeTagged<Node<K, V>>; 1],
 }
 
 impl<K, V> Levels<K, V> {
@@ -54,7 +56,7 @@ impl<K, V> Levels<K, V> {
 }
 
 impl<K, V> Index<usize> for Levels<K, V> {
-    type Output = AtomicPtr<Node<K, V>>;
+    type Output = MaybeTagged<Node<K, V>>;
 
     fn index(&self, index: usize) -> &Self::Output {
         unsafe { self.pointers.get_unchecked(index) }
@@ -62,10 +64,11 @@ impl<K, V> Index<usize> for Levels<K, V> {
 }
 
 #[repr(C)]
-pub(crate) struct Node<K, V> {
-    pub(crate) key: K,
-    pub(crate) val: V,
+pub struct Node<K, V> {
+    pub key: K,
+    pub val: V,
     pub(crate) height_and_removed: AtomicU32,
+    pub(crate) refs: AtomicU32,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -132,7 +135,19 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.height_and_removed.load(Ordering::Relaxed) << 1 >> 1) as usize
+        (self.height_and_removed.load(Ordering::Relaxed) & (!REMOVED_MASK & !BUILD_MASK)) as usize
+    }
+
+    pub(crate) fn refs(&self) -> usize {
+        self.refs.load(Ordering::SeqCst) as usize
+    }
+
+    pub(crate) fn add_ref(&self) -> usize {
+        self.refs.fetch_add(1, Ordering::SeqCst) as usize
+    }
+
+    pub(crate) fn sub_ref(&self) -> usize {
+        self.refs.fetch_sub(1, Ordering::SeqCst) as usize
     }
 
     pub(crate) fn removed(&self) -> bool {
@@ -143,14 +158,20 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn set_removed(&self) -> Result<u32, ()> {
+        self.set_har_with(|old| old | REMOVED_MASK)
+    }
+
+    fn set_har_with<F>(&self, f: F) -> Result<u32, ()>
+    where
+        F: Fn(u32) -> u32,
+    {
         let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
-        // if removed is set then someone else is already removing the node
-        if height_and_removed.leading_zeros() == 0 {
+
+        let new_height_and_removed = f(height_and_removed);
+
+        if new_height_and_removed == height_and_removed {
             return Err(());
         }
-
-        // set removed
-        let new_height_and_removed = height_and_removed | REMOVED_MASK;
 
         // try to exchange
         self.height_and_removed
@@ -168,7 +189,8 @@ impl<K, V> Node<K, V> {
 
         let old_height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
 
-        let new_height_and_removed = (old_height_and_removed & REMOVED_MASK) | height as u32;
+        let new_height_and_removed =
+            (old_height_and_removed & (REMOVED_MASK | BUILD_MASK)) | height as u32;
 
         while let Err(other) = self.height_and_removed.compare_exchange(
             old_height_and_removed,
@@ -176,10 +198,30 @@ impl<K, V> Node<K, V> {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            if (other << 1 >> 1) <= height as u32 {
+            // If the new height is less then the height we are trying to set, we stop.
+            if (other & (!REMOVED_MASK & !BUILD_MASK)) <= height as u32 {
                 break;
             }
         }
+    }
+
+    pub(crate) fn tag_levels(&self, tag: usize) -> Result<usize, usize> {
+        for level in (0..self.height()).rev() {
+            if let Err(o_tag) = self.levels[level].compare_exchange_tag(0, tag) {
+                return Err(o_tag);
+            }
+        }
+        Ok(self.height() - 1)
+    }
+
+    pub(crate) fn try_remove_and_tag(&self) -> Result<(K, V), ()> {
+        self.set_removed()?;
+
+        let kv = unsafe { (core::ptr::read(&self.key), core::ptr::read(&self.val)) };
+
+        self.tag_levels(1).map_err(|_| ())?;
+
+        Ok(kv)
     }
 }
 
@@ -206,7 +248,7 @@ where
             .field(
                 "levels",
                 &(0..self.height()).fold(String::new(), |acc, level| {
-                    format!("{}{:?}, ", acc, self.levels[level])
+                    format!("{}{:?}, ", acc, self.levels[level].as_std())
                 }),
             )
             .finish()
@@ -252,5 +294,13 @@ mod node_test {
         assert_eq!(node.height(), 3);
 
         assert!(node.removed());
+
+        assert_eq!(node.height(), 3);
+
+        node.set_height(2);
+
+        assert_eq!(node.height(), 2);
+
+        assert_eq!(node.height(), 2);
     }
 }

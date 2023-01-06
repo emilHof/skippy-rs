@@ -79,22 +79,14 @@ impl ListState {
 /// methods themselves.
 macro_rules! skiplist_basics {
     ($my_list: ident) => {
-        pub struct $my_list<'domain, K, V>
-        where
-            K: core::marker::Sync,
-            V: core::marker::Sync,
-        {
+        pub struct $my_list<'domain, K, V> {
             pub(crate) head: core::ptr::NonNull<crate::internal::utils::Head<K, V>>,
             pub(crate) state: crate::internal::utils::Padded<crate::internal::utils::ListState>,
             #[allow(dead_code)]
             pub(crate) garbage: crate::internal::utils::Can<'domain>,
         }
 
-        impl<'domain, K, V> $my_list<'domain, K, V>
-        where
-            K: core::marker::Sync,
-            V: core::marker::Sync,
-        {
+        impl<'domain, K, V> $my_list<'domain, K, V> {
             pub fn new() -> Self {
                 $my_list {
                     head: crate::internal::utils::Head::new(),
@@ -141,11 +133,7 @@ macro_rules! skiplist_basics {
         }
 
         /// Need this trait for our [Node](Node)s to be generated with random heights.
-        impl<'domain, K, V> GeneratesHeight for $my_list<'domain, K, V>
-        where
-            K: core::marker::Sync,
-            V: core::marker::Sync,
-        {
+        impl<'domain, K, V> GeneratesHeight for $my_list<'domain, K, V> {
             fn gen_height(&self) -> usize {
                 self.gen_height()
             }
@@ -153,16 +141,12 @@ macro_rules! skiplist_basics {
 
         // TODO Verify this is sound for all variants of SkipList
         /// Manual `Drop` implementation for all `SkipList`s
-        impl<'domain, K, V> Drop for $my_list<'domain, K, V>
-        where
-            K: core::marker::Sync,
-            V: core::marker::Sync,
-        {
+        impl<'domain, K, V> Drop for $my_list<'domain, K, V> {
             fn drop(&mut self) {
                 // To ensure this is safe, clear all `HazardPointer`s in the domain.
                 // We do not want to drop a node twice!
                 self.garbage.domain.eager_reclaim();
-                let mut node = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
+                let mut node = unsafe { (*self.head.as_ptr()).levels[0].as_hpz().load_ptr() };
 
                 // # Safety
                 //
@@ -170,7 +154,7 @@ macro_rules! skiplist_basics {
                 unsafe {
                     while !node.is_null() {
                         let temp = node;
-                        node = (*temp).levels[0].load_ptr();
+                        node = (*temp).levels[0].as_hpz().load_ptr();
                         crate::internal::utils::Node::<K, V>::drop(temp);
                     }
 
