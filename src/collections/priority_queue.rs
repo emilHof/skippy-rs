@@ -1,43 +1,72 @@
+use crate::internal::skiplist;
 use crate::internal::skiplist::SkipList;
-use std::borrow::Borrow;
-use std::marker::PhantomData;
+use crate::internal::sync;
+use crate::internal::sync::SkipList as SyncSkipList;
 
-pub struct PriorityQueue<V, L> {
+/// [PriorityQueue](PriorityQueue) is implemented using a [SkipList](crate::skiplist::SkipList) and is available as both
+/// a non-thread safe, but faster, and a thread-safe, yet slower, variation.
+pub struct PriorityQueue<L> {
     queue: L,
-    _phantom: PhantomData<V>,
 }
 
-impl<'domain, V> PriorityQueue<V, SkipList<'domain, V, ()>>
-where
-    V: Sync,
-{
-    pub fn new() -> Self {
+impl<'domain> PriorityQueue<()> {
+    pub fn new<V: Sync>() -> PriorityQueue<SkipList<'domain, V, ()>> {
         PriorityQueue {
             queue: SkipList::new(),
-            _phantom: PhantomData,
+        }
+    }
+    pub fn new_sync<V: Sync>() -> PriorityQueue<SyncSkipList<'domain, V, ()>> {
+        PriorityQueue {
+            queue: SyncSkipList::new(),
         }
     }
 }
 
-impl<'a, V, L> PriorityQueue<V, L>
+unsafe impl<L> Send for PriorityQueue<L> where L: Send + Sync {}
+
+unsafe impl<L> Sync for PriorityQueue<L> where L: Send + Sync {}
+
+impl<'a, V> PriorityQueue<SkipList<'a, V, ()>>
 where
-    L: crate::skiplist::SkipList<V, ()> + 'a,
-    V: Ord + 'a,
-    L::Entry<'a>: Borrow<V>,
+    V: Ord,
 {
     pub fn push(&mut self, value: V) {
         self.queue.insert(value, ());
     }
 
-    pub fn peek(&'a self) -> Option<L::Entry<'a>> {
-        self.queue.front()
+    pub fn peek(&'a self) -> Option<&V> {
+        self.queue.get_first()?.key().into()
     }
 
     pub fn pop(&mut self) -> Option<V> {
-        match self.queue.front() {
-            Some(e) => self.queue.remove(e.borrow()).map(|(v, _)| v),
-            None => None,
-        }
+        self.queue.remove_first().map(|(v, ..)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
+impl<'a, V> PriorityQueue<SyncSkipList<'a, V, ()>>
+where
+    V: Ord + Send + Sync + 'a,
+{
+    pub fn push(&self, value: V) {
+        self.queue.insert(value, ());
+    }
+
+    pub fn peek(&'a self) -> Option<sync::Entry<'a, V, ()>> {
+        self.queue.get_first()
+    }
+
+    pub fn pop(&'a self) -> Option<V> {
+        let first = self.queue.get_first()?;
+
+        first.remove().map(|(v, _)| v)
     }
 
     pub fn len(&self) -> usize {
@@ -113,6 +142,7 @@ mod pq_test {
 
     #[test]
     fn test_with_std() {
+        use std::cmp::Reverse;
         let n = 100_000;
         let mut seed: u8 = rand::random();
         let mut queue = PriorityQueue::new();
@@ -125,13 +155,30 @@ mod pq_test {
 
             match seed % 5 {
                 0 => {
-                    assert_eq!(sq.pop(), queue.pop());
+                    assert_eq!(sq.pop().map(|r: Reverse<u8>| r.0), queue.pop());
                 }
                 _ => {
-                    sq.push(seed);
+                    sq.push(Reverse(seed));
                     queue.push(seed);
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_sync_push() {
+        let n = 1_000;
+        let mut seed: u32 = rand::random();
+        let queue = PriorityQueue::new_sync();
+
+        for _ in 0..n {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 7;
+
+            queue.push(seed);
+        }
+
+        assert!(queue.len() > 0);
     }
 }

@@ -10,4 +10,6 @@ pub mod collections;
 pub mod internal;
 pub mod skiplist;
 
+pub use collections::priority_queue::PriorityQueue;
 pub use internal::skiplist::SkipList;
+pub use internal::sync::SkipList as SSkipList;
