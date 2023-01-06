@@ -31,7 +31,7 @@ where
     V: Ord,
 {
     pub fn push(&mut self, value: V) {
-        self.queue.insert_adjacent(value, ());
+        self.queue.insert(value, ());
     }
 
     pub fn peek(&'a self) -> Option<&V> {

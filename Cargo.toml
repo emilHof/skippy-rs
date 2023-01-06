@@ -8,11 +8,9 @@ license-file  = "LICENSE.txt"
 keywords = ["skiplist", "lock-free", "mutli-threading", "concurrency"]
 description = "A set of lock free, thread safe, and fast data structures implemented via a Skip List"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 rand = "0.8.5"
-haphazard = { git = "https://github.com/emilHof/haphazard", version = "0.1.5" }
+haphazard = "0.1"
 
 [dev-dependencies]
 crossbeam-skiplist = "0.1"

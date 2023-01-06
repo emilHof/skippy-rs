@@ -64,9 +64,9 @@ impl<K, V> Index<usize> for Levels<K, V> {
 }
 
 #[repr(C)]
-pub(crate) struct Node<K, V> {
-    pub(crate) key: K,
-    pub(crate) val: V,
+pub struct Node<K, V> {
+    pub key: K,
+    pub val: V,
     pub(crate) height_and_removed: AtomicU32,
     pub(crate) refs: AtomicU32,
     pub(crate) levels: Levels<K, V>,

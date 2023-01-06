@@ -1,4 +1,5 @@
 use core::{ptr::NonNull, sync::atomic::Ordering};
+use std::marker::PhantomData;
 
 use crate::internal::utils::{skiplist_basics, GeneratesHeight, Levels, Node, HEIGHT};
 
@@ -13,7 +14,7 @@ where
         self.internal_insert(key, val, true)
     }
 
-    pub fn insert_adjacent(&mut self, key: K, val: V) -> Option<V> {
+    pub fn insert_conditionally(&mut self, key: K, val: V) -> Option<V> {
         self.internal_insert(key, val, false)
     }
 
@@ -21,26 +22,23 @@ where
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         unsafe {
-            let insertion_point = self.find(&key);
+            let mut insertion_point = self.find(&key);
 
-            match insertion_point {
-                SearchResult {
-                    target: Some(target),
-                    ..
-                } if replace => {
-                    std::mem::swap(&mut (*target.as_ptr()).val, &mut val);
-                    Some(val)
+            if let Some(mut target) = insertion_point.target.take() {
+                if replace {
+                    core::mem::swap(&mut target.as_mut().val, &mut val);
                 }
-                SearchResult { prev, .. } => {
-                    let new_node = Node::new_rand_height(key, val, self);
 
-                    self.link_nodes(new_node, prev);
-
-                    self.state.len.fetch_add(1, Ordering::Relaxed);
-
-                    None
-                }
+                return Some(val);
             }
+
+            let new_node = Node::new_rand_height(key, val, self);
+
+            self.link_nodes(new_node, insertion_point.prev);
+
+            self.state.len.fetch_add(1, Ordering::Relaxed);
+
+            None
         }
     }
 
@@ -187,8 +185,29 @@ where
         unsafe {
             match self.find(key) {
                 SearchResult {
-                    target: Some(ptr), ..
-                } => Some(Entry { node: ptr.as_ref() }),
+                    target: Some(node), ..
+                } => Some(Entry {
+                    node,
+                    _lt: PhantomData,
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    pub fn get_mut<'a>(&'a mut self, key: &K) -> Option<MutEntry<'a, K, V>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        unsafe {
+            match self.find(key) {
+                SearchResult {
+                    target: Some(node), ..
+                } => Some(MutEntry {
+                    node,
+                    _lt: PhantomData,
+                }),
                 _ => None,
             }
         }
@@ -198,9 +217,7 @@ where
         std::ptr::eq(ptr, self.head.as_ptr().cast())
     }
 
-    fn next_node<'a>(&'a self, entry: &Entry<'a, K, V>) -> Option<Entry<'a, K, V>> {
-        let node = entry.node;
-
+    fn next_node<'a, E: NodeEntry<K, V>>(&'a self, node: &E) -> Option<E> {
         if node.levels[0].load_tag() == 1 {
             return None;
         }
@@ -209,7 +226,7 @@ where
 
         unsafe {
             while !next.is_null() && (*next).levels[0].load_tag() == 1 {
-                next = Self::unlink_level(node as *const _ as *mut Node<K, V>, next, 0);
+                next = Self::unlink_level(&(*node) as *const _ as *mut Node<K, V>, next, 0);
             }
         }
 
@@ -217,7 +234,7 @@ where
             return None;
         }
 
-        unsafe { Some(Entry { node: &(*next) }) }
+        unsafe { Some(E::from_raw(NonNull::new_unchecked(next))) }
     }
 
     pub fn get_first<'a>(&'a self) -> Option<Entry<'a, K, V>> {
@@ -227,7 +244,21 @@ where
 
         unsafe {
             self.next_node(&Entry {
-                node: &(*self.head.as_ptr().cast()),
+                node: NonNull::new_unchecked(self.head.as_ptr().cast()),
+                _lt: PhantomData,
+            })
+        }
+    }
+
+    pub fn get_first_mut<'a>(&'a mut self) -> Option<MutEntry<'a, K, V>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        unsafe {
+            self.next_node(&MutEntry {
+                node: NonNull::new_unchecked(self.head.as_ptr().cast()),
+                _lt: PhantomData,
             })
         }
     }
@@ -240,6 +271,16 @@ where
         }
 
         Some(curr)
+    }
+
+    pub fn get_last_mut<'a>(&'a mut self) -> Option<MutEntry<'a, K, V>> {
+        let mut curr = self.get_first()?;
+
+        while let Some(next) = self.next_node(&curr) {
+            curr = next;
+        }
+
+        unsafe { Some(core::mem::transmute(curr)) }
     }
 
     fn traverse_with<F>(&self, mut f: F)
@@ -262,7 +303,7 @@ where
         }
     }
 
-    pub fn entry<'a: 'domain>(&'a mut self, key: K) -> Option<MutEntry<'a, K, V>> {
+    pub fn entry<'a: 'domain>(&'a mut self, key: K) -> Option<Removable<'a, K, V>> {
         if self.is_empty() {
             return None;
         }
@@ -272,7 +313,7 @@ where
                 SearchResult {
                     prev: _,
                     target: Some(mut target),
-                } => MutEntry {
+                } => Removable {
                     node: target.as_mut(),
                     list: self,
                     key,
@@ -282,29 +323,85 @@ where
             }
         }
     }
+
+    pub fn iter<'a>(&'a self) -> iter::Iter<'a, K, V> {
+        iter::Iter::from_list(self)
+    }
+
+    pub fn iter_mut<'a: 'domain>(&'a mut self) -> iter::IterMut<'a, K, V> {
+        iter::IterMut::from_list(self)
+    }
+}
+
+pub trait NodeEntry<K, V>: core::ops::Deref<Target = Node<K, V>> {
+    fn from_raw(raw: NonNull<<Self as core::ops::Deref>::Target>) -> Self;
 }
 
 pub struct Entry<'a, K, V> {
-    node: &'a Node<K, V>,
+    node: NonNull<Node<K, V>>,
+    _lt: PhantomData<(&'a K, &'a V)>,
 }
 
 impl<'a, K, V> Entry<'a, K, V> {
     pub fn val(&self) -> &'a V {
-        &self.node.val
+        unsafe { &self.node.as_ref().val }
     }
 
     pub fn key(&self) -> &'a K {
-        &self.node.key
+        unsafe { &self.node.as_ref().key }
+    }
+}
+
+impl<'a, K, V> core::ops::Deref for Entry<'a, K, V> {
+    type Target = Node<K, V>;
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.node.as_ref() }
+    }
+}
+
+impl<'a, K, V> NodeEntry<K, V> for Entry<'a, K, V> {
+    fn from_raw(raw: NonNull<<Self as core::ops::Deref>::Target>) -> Self {
+        Entry {
+            node: raw,
+            _lt: PhantomData,
+        }
     }
 }
 
 pub struct MutEntry<'a, K, V> {
+    node: NonNull<Node<K, V>>,
+    _lt: PhantomData<(&'a K, &'a V)>,
+}
+
+impl<'a, K, V> core::ops::Deref for MutEntry<'a, K, V> {
+    type Target = Node<K, V>;
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.node.as_ref() }
+    }
+}
+
+impl<'a, K, V> core::ops::DerefMut for MutEntry<'a, K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.node.as_mut() }
+    }
+}
+
+impl<'a, K, V> NodeEntry<K, V> for MutEntry<'a, K, V> {
+    fn from_raw(raw: NonNull<<Self as core::ops::Deref>::Target>) -> Self {
+        MutEntry {
+            node: raw,
+            _lt: PhantomData,
+        }
+    }
+}
+
+pub struct Removable<'a, K, V> {
     list: &'a mut SkipList<'a, K, V>,
     node: &'a mut Node<K, V>,
     key: K,
 }
 
-impl<'a, K, V> MutEntry<'a, K, V> {
+impl<'a, K, V> Removable<'a, K, V> {
     pub fn val(&self) -> &V {
         &self.node.val
     }
@@ -314,7 +411,7 @@ impl<'a, K, V> MutEntry<'a, K, V> {
     }
 }
 
-impl<'a, K: Ord, V> MutEntry<'a, K, V> {
+impl<'a, K: Ord, V> Removable<'a, K, V> {
     pub fn remove(self) -> Option<(K, V)> {
         self.list.remove(&self.key)
     }
@@ -325,8 +422,114 @@ struct SearchResult<'a, K, V> {
     target: Option<NonNull<Node<K, V>>>,
 }
 
+pub mod iter {
+    use super::{Entry, MutEntry, SkipList};
+    use core::iter::Iterator;
+
+    pub struct Iter<'a, K, V> {
+        list: &'a SkipList<'a, K, V>,
+        next: Option<Entry<'a, K, V>>,
+    }
+
+    impl<'a, K, V> Iter<'a, K, V>
+    where
+        K: Ord,
+    {
+        pub fn from_list(list: &'a SkipList<'a, K, V>) -> Self {
+            Iter {
+                list,
+                next: list.get_first(),
+            }
+        }
+    }
+
+    impl<'a, K, V> Iterator for Iter<'a, K, V>
+    where
+        K: Ord,
+    {
+        type Item = Entry<'a, K, V>;
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(next) = self.next.take() {
+                self.next = self.list.next_node(&next);
+
+                Some(next)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub struct IterMut<'a, K, V> {
+        list: &'a SkipList<'a, K, V>,
+        next: Option<Entry<'a, K, V>>,
+    }
+
+    impl<'a, K, V> IterMut<'a, K, V>
+    where
+        K: Ord,
+    {
+        pub fn from_list(list: &'a mut SkipList<'a, K, V>) -> Self {
+            IterMut {
+                list: &(*list),
+                next: list.get_first(),
+            }
+        }
+    }
+
+    impl<'a, K, V> Iterator for IterMut<'a, K, V>
+    where
+        K: Ord,
+    {
+        type Item = MutEntry<'a, K, V>;
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(next) = self.next.take() {
+                self.next = self.list.next_node(&next);
+
+                unsafe { Some(core::mem::transmute(next)) }
+            } else {
+                None
+            }
+        }
+    }
+
+    pub struct IntoIter<'a, K, V> {
+        list: SkipList<'a, K, V>,
+    }
+
+    impl<'a, K, V> IntoIter<'a, K, V>
+    where
+        K: Ord,
+    {
+        pub fn from_list(list: SkipList<'a, K, V>) -> Self {
+            IntoIter { list }
+        }
+    }
+
+    impl<'a, K, V> Iterator for IntoIter<'a, K, V>
+    where
+        K: Ord,
+    {
+        type Item = (K, V);
+        fn next(&mut self) -> Option<Self::Item> {
+            self.list.remove_first()
+        }
+    }
+
+    impl<'a, K, V> core::iter::IntoIterator for SkipList<'a, K, V>
+    where
+        K: Ord,
+    {
+        type Item = (K, V);
+        type IntoIter = IntoIter<'a, K, V>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            IntoIter::from_list(self)
+        }
+    }
+}
+
 #[cfg(test)]
-mod test {
+mod skiplist_test {
     use super::*;
 
     #[test]
@@ -389,74 +592,16 @@ mod test {
         let mut list = SkipList::new();
 
         list.insert(1, 1);
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
 
-        println!("/////////////////////////////////////////////////////////////////////////");
-        println!("/////////////////////////////////////////////////////////////////////////");
+        list.iter().for_each(|n| println!("k: {}", n.key));
 
         list.insert(2, 2);
 
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
-
-        println!("/////////////////////////////////////////////////////////////////////////");
-        println!("/////////////////////////////////////////////////////////////////////////");
+        list.iter().for_each(|n| println!("k: {}", n.key));
 
         list.insert(5, 3);
 
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
-
-        println!("trying to drop");
+        list.iter().for_each(|n| println!("k: {}", n.key));
     }
 
     #[test]
@@ -487,48 +632,11 @@ mod test {
         list.insert(2, 2);
         list.insert(5, 3);
 
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
+        list.iter().for_each(|n| println!("k: {}", n.key));
 
         assert!(list.remove(&1).is_some());
 
-        println!("/////////////////////////////////////////////////////////////////////////");
-        println!("/////////////////////////////////////////////////////////////////////////");
-
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
+        list.iter().for_each(|n| println!("k: {}", n.key));
 
         println!("removing 6");
         assert!(list.remove(&6).is_none());
@@ -540,27 +648,7 @@ mod test {
         assert!(list.remove(&2).is_some());
         //list.remove(&2);
 
-        println!("/////////////////////////////////////////////////////////////////////////");
-        println!("/////////////////////////////////////////////////////////////////////////");
-
-        unsafe {
-            let mut node = &(*list.head.as_ptr()).levels[0];
-            while !node.as_std().load(Ordering::Relaxed).is_null() {
-                println!(
-                    "{:?}-key: {:?}, val: {:?}----------------------------------------------",
-                    node.as_std(),
-                    (*node.as_std().load(Ordering::Relaxed)).key,
-                    (*node.as_std().load(Ordering::Relaxed)).key
-                );
-                print!("                                ");
-                for level in 0..(*node.as_std().load(Ordering::Relaxed)).height() {
-                    let ref left = (*node.as_std().load(Ordering::Relaxed)).levels[level];
-                    print!("{:?} | ", left.as_std());
-                }
-                println!();
-                node = &(*node.as_std().load(Ordering::Relaxed)).levels[0];
-            }
-        }
+        list.iter().for_each(|n| println!("k: {}", n.key));
 
         assert_eq!(list.len(), 0);
     }

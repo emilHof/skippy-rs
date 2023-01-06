@@ -16,7 +16,7 @@ impl<T> MaybeTagged<T> {
     #[inline]
     fn decompose_raw(raw: *mut T) -> (*mut T, usize) {
         (
-            (raw as usize & !unused_bits::<T>()) as *mut T,
+            usize_to_ptr_with_provenance(raw as usize & !unused_bits::<T>(), raw),
             raw as usize & unused_bits::<T>(),
         )
     }
@@ -33,7 +33,10 @@ impl<T> MaybeTagged<T> {
 
     #[inline]
     fn compose_raw(ptr: *mut T, tag: usize) -> *mut T {
-        ((ptr as usize & !unused_bits::<T>()) | (tag & unused_bits::<T>())) as *mut T
+        usize_to_ptr_with_provenance(
+            (ptr as usize & !unused_bits::<T>()) | (tag & unused_bits::<T>()),
+            ptr,
+        )
     }
 
     pub(crate) fn store_ptr(&self, ptr: *mut T) {
@@ -118,6 +121,11 @@ const fn align<T>() -> usize {
 
 const fn unused_bits<T>() -> usize {
     (1 << align::<T>().trailing_zeros()) - 1
+}
+
+fn usize_to_ptr_with_provenance<T>(addr: usize, prov: *mut T) -> *mut T {
+    let ptr = prov.cast::<u8>();
+    ptr.wrapping_add(addr.wrapping_sub(ptr as usize)).cast()
 }
 
 impl<'a, K, V> NodeRef<'a, K, V> {
