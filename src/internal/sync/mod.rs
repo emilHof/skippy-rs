@@ -983,7 +983,7 @@ mod sync_test {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..1000 {
+                    for _ in 0..5_000 {
                         let target = rng.gen::<u8>();
                         if rng.gen::<u8>() % 5 == 0 {
                             list.remove(&target);
