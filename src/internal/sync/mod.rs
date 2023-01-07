@@ -259,10 +259,9 @@ where
 
         if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
             if curr.sub_ref() == 0 {
-                self.state.len.fetch_sub(1, Ordering::Relaxed);
+                self.state.len.fetch_sub(1, Ordering::AcqRel);
 
                 self.retire_node(curr.as_ptr());
-                self.garbage.domain.eager_reclaim();
             }
             Ok(next)
         } else {

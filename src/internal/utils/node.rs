@@ -139,20 +139,20 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn refs(&self) -> usize {
-        self.refs.load(Ordering::SeqCst) as usize
+        self.refs.load(Ordering::Acquire) as usize
     }
 
     pub(crate) fn add_ref(&self) -> usize {
-        self.refs.fetch_add(1, Ordering::SeqCst) as usize
+        self.refs.fetch_add(1, Ordering::AcqRel) as usize
     }
 
     pub(crate) fn sub_ref(&self) -> usize {
-        self.refs.fetch_sub(1, Ordering::SeqCst) as usize
+        self.refs.fetch_sub(1, Ordering::AcqRel) as usize
     }
 
     pub(crate) fn removed(&self) -> bool {
         self.height_and_removed
-            .load(Ordering::SeqCst)
+            .load(Ordering::Acquire)
             .leading_zeros()
             == 0
     }
