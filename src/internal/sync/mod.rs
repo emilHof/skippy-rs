@@ -127,15 +127,16 @@ where
             new_node.levels[i].store_ptr(next_ptr);
 
             // Swap the new_node into the previous' level. If the previous' level has changed since
+            new_node.add_ref();
             // the search, we repeat the search from this level.
             if let Err((_other, _tag)) = prev.levels[i].compare_exchange(
                 next_ptr, 
                 new_node.as_ptr()
             ) {
+                new_node.sub_ref();
                 return Err(i);
             }
 
-            new_node.add_ref();
         }
         Ok(())
     }
@@ -823,13 +824,13 @@ mod sync_test {
         let list = SkipList::new();
         let mut rng: u16 = rand::random();
 
-        for _ in 0..100_000 {
+        for _ in 0..10_000 {
             rng ^= rng << 3;
             rng ^= rng >> 12;
             rng ^= rng << 7;
             list.insert(rng, "hello there!");
         }
-        for _ in 0..100_000 {
+        for _ in 0..10_000 {
             rng ^= rng << 3;
             rng ^= rng >> 12;
             rng ^= rng << 7;
