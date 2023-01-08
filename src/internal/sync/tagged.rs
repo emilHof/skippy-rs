@@ -62,8 +62,8 @@ impl<T> MaybeTagged<T> {
             match self.0.as_std().compare_exchange(
                 Self::compose_raw(expected, e_tag),
                 Self::compose_raw(new, n_tag),
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
             ) {
                 Ok(new) => Ok(Self::decompose_raw(new)),
                 Err(other) => Err(Self::decompose_raw(other)),

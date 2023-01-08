@@ -910,6 +910,7 @@ mod sync_test {
         // remove the node logically
         node_4.height_and_removed.store(
             node_4.height_and_removed.load(Ordering::SeqCst) ^ (1 as u32) << 31,
+            node_4.height_and_removed.load(Ordering::SeqCst) & (usize::MAX >> 1),
             Ordering::SeqCst,
         );
 
