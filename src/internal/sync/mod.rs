@@ -126,8 +126,13 @@ where
             // repeats its search and finds that we are the next
             new_node.levels[i].store_ptr(next_ptr);
 
+            if i == 0 {
+                new_node.add_ref();
+            } else if new_node.try_add_ref().is_err() {
+                break;
+            }
+
             // Swap the new_node into the previous' level. If the previous' level has changed since
-            new_node.add_ref();
             // the search, we repeat the search from this level.
             if let Err((_other, _tag)) = prev.levels[i].compare_exchange(
                 next_ptr, 
@@ -228,7 +233,7 @@ where
                 return Err(i + 1);
             }
 
-            node.as_ref().sub_ref();
+            node.as_ref().try_sub_ref().expect("not to underflow");
         }
 
         self.state.len.fetch_sub(1, Ordering::AcqRel);
@@ -258,7 +263,7 @@ where
         let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
         if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
-            if curr.sub_ref() == 0 {
+            if curr.try_sub_ref().expect("not to underflow") == 0 {
                 self.state.len.fetch_sub(1, Ordering::AcqRel);
 
                 self.retire_node(curr.as_ptr());
