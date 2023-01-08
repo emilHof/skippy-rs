@@ -102,12 +102,12 @@ where
     ) -> Result<(), usize> {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..new_node.height() {
+            let (prev, next) = &previous_nodes[i];
+            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
+
             if new_node.removed() {
                 break;
             }
-
-            let (prev, next) = &previous_nodes[i];
-            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
             // we check if the next node is actually lower in key than our current node.
             if next.as_ref()
@@ -126,8 +126,13 @@ where
             // repeats its search and finds that we are the next
             new_node.levels[i].store_ptr(next_ptr);
 
+            if i == 0 {
+                new_node.add_ref();
+            } else if new_node.try_add_ref().is_err() {
+                break;
+            }
+
             // Swap the new_node into the previous' level. If the previous' level has changed since
-            new_node.add_ref();
             // the search, we repeat the search from this level.
             if let Err((_other, _tag)) = prev.levels[i].compare_exchange(
                 next_ptr, 
@@ -142,7 +147,7 @@ where
     }
 
     #[allow(unused_assignments)]
-    pub fn remove(&self, key: &K) -> Option<(K, V)>
+    pub fn remove<'a>(&'a self, key: &K) -> Option<Entry<'a, K, V>>
     where
         K: Send,
         V: Send,
@@ -164,13 +169,7 @@ where
                 // 1. `key` and `val` will not be tempered with.
                 // TODO This works for now, yet once `Atomic` is used
                 // this may need to change.
-                let (key, val, height) = unsafe {
-                    (
-                        core::ptr::read(&target.key),
-                        core::ptr::read(&target.val),
-                        target.height()
-                    )
-                };
+                let height = target.height();
 
                 if let Err(_) = target.tag_levels(1) {
                     panic!("SHOULD NOT BE TAGGED!")
@@ -185,7 +184,7 @@ where
                 }
 
 
-                Some((key, val))
+                Some(target.into())
             }
             _ => None,
         }
@@ -228,17 +227,27 @@ where
                 return Err(i + 1);
             }
 
-            node.as_ref().sub_ref();
+            if self.sub_ref(&node).is_none() {
+                break;
+            };
         }
 
         self.state.len.fetch_sub(1, Ordering::AcqRel);
 
-        // Since all levels were unlinked we can safely retire the node.
-        self.retire_node(node.as_ptr());
-
         // we see if we can drop some pointers in the list.
         self.garbage.domain.eager_reclaim();
         Ok(())
+    }
+
+    /// Decrements the reference count of the `Node` by 1. If the reference count is thus 0, we
+    /// retire the node.
+    fn sub_ref<'a>(&self, node: &NodeRef<'a, K, V>) -> Option<()> {
+        if node.try_sub_ref().expect("to not underflow") == 0 {
+            self.retire_node(node.as_ptr());
+            None
+        } else {
+            Some(())
+        }
     }
 
     /// Unlink [Node](Node) `curr` at the given level of [Node](Node) `prev` by exchanging the pointer for `next`.
@@ -258,12 +267,8 @@ where
         let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
         if let Ok(_) = prev.levels[level].compare_exchange(curr.as_ptr(), next_ptr) {
-            if curr.sub_ref() == 0 {
-                self.state.len.fetch_sub(1, Ordering::Relaxed);
+            self.sub_ref(&curr);
 
-                self.retire_node(curr.as_ptr());
-                self.garbage.domain.eager_reclaim();
-            }
             Ok(next)
         } else {
             Err(())
@@ -275,24 +280,6 @@ where
             self.garbage
                 .domain
                 .retire_ptr::<Node<K, V>, DeallocOnDrop<K, V>>(node_ptr)
-                /*
-                .retire_ptr_with(node_ptr, |ptr: *mut dyn Reclaim| {
-                    Node::<K, V>::dealloc(ptr as *mut Node<K, V>);
-                })
-                */
-        };
-    }
-
-    fn retire_node_empty(&self, node_ptr: *mut Node<K, V>) {
-        unsafe {
-            self.garbage
-                .domain
-                .retire_ptr::<Node<K, V>, DeallocOnDrop<K, V>>(node_ptr)
-                /*
-                .retire_ptr_with(node_ptr, |ptr: *mut dyn haphazard::raw::Reclaim| {
-                    Node::<K, V>::dealloc(ptr as *mut Node<K, V>);
-                })
-                */
         };
     }
 
@@ -553,20 +540,23 @@ impl<'a, K, V> Entry<'a, K, V> {
         unsafe { &self.node.as_ref().key }
     }
 
-    pub fn remove(self) -> Option<(K, V)> {
+    pub fn remove(self) -> Option<Entry<'a, K, V>> {
         unsafe {
             self.node.as_ref().set_removed().ok()?;
 
-            let (key, val) = (
-                core::ptr::read(&self.node.as_ref().key),
-                core::ptr::read(&self.node.as_ref().val),
-            );
-
             self.node.as_ref().tag_levels(1).expect("no tags to exists");
 
-            (key, val).into()
+            Some(self)
             
         }
+    }
+}
+
+impl<'a, K, V> core::ops::Deref for Entry<'a, K, V> {
+    type Target = Node<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.node.as_ref() }
     }
 }
 
@@ -712,7 +702,7 @@ impl<K, V> From<*mut Node<K, V>> for DeallocOnDrop<K, V> {
 impl<K, V> Drop for DeallocOnDrop<K, V> {
     fn drop(&mut self) {
         unsafe {
-            Node::dealloc(self.0)
+            Node::drop(self.0)
         }
     }
 }
@@ -910,7 +900,7 @@ mod sync_test {
 
         // remove the node logically
         node_4.height_and_removed.store(
-            node_4.height_and_removed.load(Ordering::SeqCst) ^ (1 as u32) << 31,
+            node_4.height_and_removed.load(Ordering::SeqCst) & (usize::MAX >> 1),
             Ordering::SeqCst,
         );
 
@@ -984,7 +974,7 @@ mod sync_test {
                 let list = list.clone();
                 std::thread::spawn(move || {
                     let mut rng = rand::thread_rng();
-                    for _ in 0..1000 {
+                    for _ in 0..5_000 {
                         let target = rng.gen::<u8>();
                         if rng.gen::<u8>() % 5 == 0 {
                             list.remove(&target);
