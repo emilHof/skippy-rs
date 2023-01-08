@@ -1,10 +1,12 @@
 extern crate alloc;
 
 use crate::internal::sync::tagged::MaybeTagged;
+use crate::internal::utils::HEIGHT;
+use crate::internal::utils::HEIGHT_BITS;
+use crate::internal::utils::HEIGHT_MASK;
 use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 
-const REMOVED_MASK: u32 = (1 as u32) << 31;
-const BUILD_MASK: u32 = (1 as u32) << 30;
+const REMOVED_MASK: usize = !(usize::MAX >> 1);
 
 use core::{
     fmt::Debug,
@@ -12,7 +14,7 @@ use core::{
     mem,
     ops::Index,
     ptr::{self, NonNull},
-    sync::atomic::AtomicU32,
+    sync::atomic::AtomicUsize,
     sync::atomic::Ordering,
 };
 
@@ -21,8 +23,7 @@ use core::{
 pub(crate) struct Head<K, V> {
     pub(crate) key: K,
     pub(crate) val: V,
-    pub(crate) height_and_removed: AtomicU32,
-    pub(crate) refs: AtomicU32,
+    pub(crate) height_and_removed: AtomicUsize,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -49,7 +50,7 @@ pub(crate) struct Levels<K, V> {
 
 impl<K, V> Levels<K, V> {
     fn get_size(height: usize) -> usize {
-        assert!(height <= super::HEIGHT && height > 0);
+        assert!(height <= HEIGHT && height > 0);
 
         mem::size_of::<Self>() * (height - 1)
     }
@@ -67,8 +68,7 @@ impl<K, V> Index<usize> for Levels<K, V> {
 pub struct Node<K, V> {
     pub key: K,
     pub val: V,
-    pub(crate) height_and_removed: AtomicU32,
-    pub(crate) refs: AtomicU32,
+    pub(crate) height_and_removed: AtomicUsize,
     pub(crate) levels: Levels<K, V>,
 }
 
@@ -101,10 +101,7 @@ impl<K, V> Node<K, V> {
             handle_alloc_error(layout);
         }
 
-        ptr::write(
-            &mut (*ptr).height_and_removed,
-            AtomicU32::new(height as u32),
-        );
+        ptr::write(&mut (*ptr).height_and_removed, AtomicUsize::new(height));
 
         ptr::write_bytes((*ptr).levels.pointers.as_mut_ptr(), 0, height);
 
@@ -135,35 +132,74 @@ impl<K, V> Node<K, V> {
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.height_and_removed.load(Ordering::Relaxed) & (!REMOVED_MASK & !BUILD_MASK)) as usize
+        (self.height_and_removed.load(Ordering::Relaxed) & HEIGHT_MASK) as usize
     }
 
     pub(crate) fn refs(&self) -> usize {
-        self.refs.load(Ordering::SeqCst) as usize
+        ((self.height_and_removed.load(Ordering::SeqCst) & !REMOVED_MASK) >> (HEIGHT_BITS + 1))
+            as usize
     }
 
     pub(crate) fn add_ref(&self) -> usize {
-        self.refs.fetch_add(1, Ordering::SeqCst) as usize
+        /*
+        println!(
+            "refs before: {}",
+            self.height_and_removed.load(Ordering::SeqCst)
+        );
+        */
+        let refs = self
+            .height_and_removed
+            .fetch_add(1 << (HEIGHT_BITS + 1), Ordering::SeqCst) as usize;
+        // println!("refs before: {}", refs);
+
+        refs
+    }
+
+    pub(crate) fn try_add_ref(&self) -> Result<usize, usize> {
+        self.height_and_removed
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |o| {
+                if (o & !REMOVED_MASK) >> (HEIGHT_BITS + 1) == 0 {
+                    return None;
+                }
+
+                Some(o + (1 << (HEIGHT_BITS + 1)))
+            })
     }
 
     pub(crate) fn sub_ref(&self) -> usize {
-        self.refs.fetch_sub(1, Ordering::SeqCst) as usize
+        self.height_and_removed
+            .fetch_sub(1 << (HEIGHT_BITS + 1), Ordering::SeqCst) as usize
+    }
+
+    pub(crate) fn try_sub_ref(&self) -> Result<usize, usize> {
+        self.height_and_removed
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |o| {
+                if (o & !REMOVED_MASK) >> (HEIGHT_BITS + 1) == 0 {
+                    /*
+                    println!("o: {}", o);
+                    println!("removed: {}", o & !REMOVED_MASK);
+                    */
+                    panic!("Will underflow")
+                }
+
+                Some(o - (1 << (HEIGHT_BITS + 1)))
+            })
     }
 
     pub(crate) fn removed(&self) -> bool {
         self.height_and_removed
-            .load(Ordering::SeqCst)
+            .load(Ordering::Acquire)
             .leading_zeros()
             == 0
     }
 
-    pub(crate) fn set_removed(&self) -> Result<u32, ()> {
+    pub(crate) fn set_removed(&self) -> Result<usize, ()> {
         self.set_har_with(|old| old | REMOVED_MASK)
     }
 
-    fn set_har_with<F>(&self, f: F) -> Result<u32, ()>
+    fn set_har_with<F>(&self, f: F) -> Result<usize, ()>
     where
-        F: Fn(u32) -> u32,
+        F: Fn(usize) -> usize,
     {
         let height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
 
@@ -182,27 +218,6 @@ impl<K, V> Node<K, V> {
                 Ordering::SeqCst,
             )
             .map_err(|_| ())
-    }
-
-    pub(crate) fn set_height(&self, height: usize) {
-        assert!(height <= self.height());
-
-        let old_height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
-
-        let new_height_and_removed =
-            (old_height_and_removed & (REMOVED_MASK | BUILD_MASK)) | height as u32;
-
-        while let Err(other) = self.height_and_removed.compare_exchange(
-            old_height_and_removed,
-            new_height_and_removed,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            // If the new height is less then the height we are trying to set, we stop.
-            if (other & (!REMOVED_MASK & !BUILD_MASK)) <= height as u32 {
-                break;
-            }
-        }
     }
 
     pub(crate) fn tag_levels(&self, tag: usize) -> Result<usize, usize> {
@@ -268,39 +283,5 @@ where
                 self.key, self.val, level,
             )
         })
-    }
-}
-
-#[cfg(test)]
-mod node_test {
-    use super::*;
-
-    #[test]
-    fn test_set_height() {
-        let node = unsafe { &mut (*Node::new(3, (), 5)) };
-
-        assert_eq!(node.height(), 5);
-
-        assert!(!node.removed());
-
-        assert!(node.set_removed().is_ok());
-
-        assert!(node.removed());
-
-        assert_eq!(node.height(), 5);
-
-        node.set_height(3);
-
-        assert_eq!(node.height(), 3);
-
-        assert!(node.removed());
-
-        assert_eq!(node.height(), 3);
-
-        node.set_height(2);
-
-        assert_eq!(node.height(), 2);
-
-        assert_eq!(node.height(), 2);
     }
 }

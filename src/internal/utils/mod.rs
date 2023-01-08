@@ -14,6 +14,7 @@ pub(crate) use padded::Padded;
 pub(crate) const HEIGHT_BITS: usize = 5;
 
 pub(crate) const HEIGHT: usize = 1 << HEIGHT_BITS;
+pub(crate) const HEIGHT_MASK: usize = (1 << (HEIGHT_BITS + 1)) - 1;
 
 /// The garbage collection of the list
 /// Utilizes Hazard Pointers under the hood to prevent use-after-frees and
