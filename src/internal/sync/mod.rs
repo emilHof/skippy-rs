@@ -102,12 +102,12 @@ where
     ) -> Result<(), usize> {
         // iterate over all the levels in the new nodes pointer tower
         for i in start_height..new_node.height() {
+            let (prev, next) = &previous_nodes[i];
+            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
+
             if new_node.removed() {
                 break;
             }
-
-            let (prev, next) = &previous_nodes[i];
-            let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
             // we check if the next node is actually lower in key than our current node.
             if next.as_ref()
@@ -909,7 +909,6 @@ mod sync_test {
 
         // remove the node logically
         node_4.height_and_removed.store(
-            node_4.height_and_removed.load(Ordering::SeqCst) ^ (1 as u32) << 31,
             node_4.height_and_removed.load(Ordering::SeqCst) & (usize::MAX >> 1),
             Ordering::SeqCst,
         );
