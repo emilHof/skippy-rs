@@ -63,10 +63,10 @@ where
         self.queue.get_first()
     }
 
-    pub fn pop(&'a self) -> Option<V> {
+    pub fn pop(&'a self) -> Option<sync::Entry<'a, V, ()>> {
         let first = self.queue.get_first()?;
 
-        first.remove().map(|(v, _)| v)
+        first.remove()
     }
 
     pub fn len(&self) -> usize {
@@ -75,6 +75,53 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+}
+
+mod iter {
+    use super::*;
+
+    impl<'a, V: Ord> PriorityQueue<SkipList<'a, V, ()>> {
+        pub fn iter(&'a self) -> skiplist::iter::Iter<'a, V, ()> {
+            self.queue.iter()
+        }
+
+        pub fn iter_mut(&'a mut self) -> skiplist::iter::IterMut<'a, V, ()> {
+            self.queue.iter_mut()
+        }
+    }
+
+    impl<'a, V> IntoIterator for PriorityQueue<SkipList<'a, V, ()>>
+    where
+        V: Ord,
+    {
+        type Item = <SkipList<'a, V, ()> as IntoIterator>::Item;
+        type IntoIter = <SkipList<'a, V, ()> as IntoIterator>::IntoIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.queue.into_iter()
+        }
+    }
+
+    impl<'a, V> PriorityQueue<SyncSkipList<'a, V, ()>>
+    where
+        V: Ord + Send + Sync,
+    {
+        pub fn iter(&'a self) -> sync::iter::Iter<'a, V, ()> {
+            self.queue.iter()
+        }
+    }
+
+    impl<'a, V> IntoIterator for PriorityQueue<SyncSkipList<'a, V, ()>>
+    where
+        V: Ord + Send + Sync,
+    {
+        type Item = <SyncSkipList<'a, V, ()> as IntoIterator>::Item;
+        type IntoIter = <SyncSkipList<'a, V, ()> as IntoIterator>::IntoIter;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.queue.into_iter()
+        }
     }
 }
 

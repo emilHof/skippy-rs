@@ -1,3 +1,5 @@
+use crate::internal::utils::Node;
+
 use super::{Entry, SkipList};
 use core::iter::{FromIterator, IntoIterator, Iterator};
 
@@ -41,7 +43,7 @@ where
     V: Send + Sync,
 {
     type Item = (K, V);
-    type IntoIter = IntoIter<'a, K, V>;
+    type IntoIter = IntoIter<K, V>;
     fn into_iter(self) -> Self::IntoIter {
         IntoIter::from_list(self)
     }
@@ -62,27 +64,48 @@ where
     }
 }
 
-pub struct IntoIter<'a, K, V> {
-    list: SkipList<'a, K, V>,
+pub struct IntoIter<K, V> {
+    next: *mut Node<K, V>,
 }
 
-impl<'a, K, V> IntoIter<'a, K, V>
+impl<K, V> IntoIter<K, V>
 where
     K: Ord + Send + Sync,
     V: Send + Sync,
 {
-    pub fn from_list(list: SkipList<'a, K, V>) -> Self {
-        IntoIter { list }
+    pub fn from_list<'a>(mut list: SkipList<'a, K, V>) -> Self {
+        unsafe {
+            let next = list.head.as_ref().levels[0].load_ptr();
+            for level in list.head.as_mut().levels.pointers.iter_mut() {
+                level.store_ptr(core::ptr::null_mut());
+            }
+
+            IntoIter { next }
+        }
     }
 }
 
-impl<'a, K, V> core::iter::Iterator for IntoIter<'a, K, V>
+impl<K, V> core::iter::Iterator for IntoIter<K, V>
 where
     K: Ord + Send + Sync,
     V: Send + Sync,
 {
     type Item = (K, V);
     fn next(&mut self) -> Option<Self::Item> {
-        self.list.get_first().and_then(|next| next.remove())
+        if self.next.is_null() {
+            return None;
+        }
+
+        let next = self.next;
+
+        self.next = unsafe { (*next).levels[0].load_ptr() };
+
+        let (key, val) = unsafe { (core::ptr::read(&(*next).key), core::ptr::read(&(*next).val)) };
+
+        unsafe {
+            Node::dealloc(next);
+        }
+
+        (key, val).into()
     }
 }
