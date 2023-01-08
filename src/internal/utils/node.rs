@@ -139,12 +139,6 @@ impl<K, V> Node<K, V> {
         ((self.height_and_removed.load(Ordering::SeqCst) & !REMOVED_MASK) >> HEIGHT_BITS) as usize
     }
 
-    /*
-    pub(crate) fn refs(&self) -> usize {
-        self.refs.load(Ordering::Acquire) as usize
-    }
-    */
-
     pub(crate) fn add_ref(&self) -> usize {
         self.height_and_removed
             .fetch_add(1 << (HEIGHT_BITS + 1), Ordering::SeqCst) as usize
@@ -187,26 +181,6 @@ impl<K, V> Node<K, V> {
                 Ordering::SeqCst,
             )
             .map_err(|_| ())
-    }
-
-    pub(crate) fn set_height(&self, height: usize) {
-        assert!(height <= self.height());
-
-        let old_height_and_removed = self.height_and_removed.load(Ordering::SeqCst);
-
-        let new_height_and_removed = (old_height_and_removed & !(HEIGHT_BITS)) | height;
-
-        while let Err(other) = self.height_and_removed.compare_exchange(
-            old_height_and_removed,
-            new_height_and_removed,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            // If the new height is less then the height we are trying to set, we stop.
-            if (other & HEIGHT_BITS) <= height {
-                break;
-            }
-        }
     }
 
     pub(crate) fn tag_levels(&self, tag: usize) -> Result<usize, usize> {
@@ -272,39 +246,5 @@ where
                 self.key, self.val, level,
             )
         })
-    }
-}
-
-#[cfg(test)]
-mod node_test {
-    use super::*;
-
-    #[test]
-    fn test_set_height() {
-        let node = unsafe { &mut (*Node::new(3, (), 5)) };
-
-        assert_eq!(node.height(), 5);
-
-        assert!(!node.removed());
-
-        assert!(node.set_removed().is_ok());
-
-        assert!(node.removed());
-
-        assert_eq!(node.height(), 5);
-
-        node.set_height(3);
-
-        assert_eq!(node.height(), 3);
-
-        assert!(node.removed());
-
-        assert_eq!(node.height(), 3);
-
-        node.set_height(2);
-
-        assert_eq!(node.height(), 2);
-
-        assert_eq!(node.height(), 2);
     }
 }
