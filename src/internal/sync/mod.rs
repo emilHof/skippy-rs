@@ -261,7 +261,7 @@ where
     /// Decrements the reference count of the `Node` by 1. If the reference count is thus 0, we
     /// retire the node.
     fn sub_ref<'a>(&self, node: &NodeRef<'a, K, V>) -> Option<()> {
-        if node.try_sub_ref().expect("to not underflow") == 0 {
+        if node.try_sub_ref().expect("to not overflow") == 0 {
             self.retire_node(node.as_ptr());
             None
         } else {
@@ -787,6 +787,77 @@ mod sync_test {
         unsafe {
             let _ = Box::from_raw(node);
         }
+    }
+
+    #[test]
+    fn test_drop() {
+        struct CountOnDrop<K> {
+            key: K,
+            counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl<K> CountOnDrop<K> {
+            fn new(key: K, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+                CountOnDrop { key, counter }
+            }
+
+            fn new_none(key: K) -> Self {
+                CountOnDrop { key, counter: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+            }
+        }
+        impl<K: Eq> PartialEq for CountOnDrop<K> {
+            fn eq(&self, other: &Self) -> bool {
+                self.key == other.key
+            }
+        }
+
+        impl<K: Eq> Eq for CountOnDrop<K> {}
+
+        impl<K: Ord> PartialOrd for CountOnDrop<K> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.key.cmp(&other.key))
+            }
+        }
+
+        impl<K: Ord> Ord for CountOnDrop<K> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.key.cmp(&other.key)
+            }
+        }
+
+        impl<K> Drop for CountOnDrop<K> {
+            fn drop(&mut self) {
+                println!("writing to counter!");
+                println!("count: {}", self.counter.load(Ordering::SeqCst));
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                println!("wrote to counter");
+            }
+        }
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let list = SkipList::new();
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        list.remove(&CountOnDrop::new_none(1));
+
+        // assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        println!("length: {}", list.len());
+
+        drop(list);
+
+
+        // core::mem::forget(list);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[test]
