@@ -135,22 +135,10 @@ impl<K, V> Node<K, V> {
         (self.height_and_removed.load(Ordering::Relaxed) & HEIGHT_MASK) as usize
     }
 
-    pub(crate) fn refs(&self) -> usize {
-        ((self.height_and_removed.load(Ordering::SeqCst) & !REMOVED_MASK) >> (HEIGHT_BITS + 1))
-            as usize
-    }
-
     pub(crate) fn add_ref(&self) -> usize {
-        /*
-        println!(
-            "refs before: {}",
-            self.height_and_removed.load(Ordering::SeqCst)
-        );
-        */
         let refs = self
             .height_and_removed
             .fetch_add(1 << (HEIGHT_BITS + 1), Ordering::SeqCst) as usize;
-        // println!("refs before: {}", refs);
 
         refs
     }
@@ -175,10 +163,6 @@ impl<K, V> Node<K, V> {
         self.height_and_removed
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |o| {
                 if (o & !REMOVED_MASK) >> (HEIGHT_BITS + 1) == 0 {
-                    /*
-                    println!("o: {}", o);
-                    println!("removed: {}", o & !REMOVED_MASK);
-                    */
                     panic!("Will underflow")
                 }
 

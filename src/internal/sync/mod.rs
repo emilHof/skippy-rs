@@ -2,20 +2,25 @@ use core::borrow::Borrow;
 use core::fmt::Debug;
 use core::marker::Sync;
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering;
 
-use haphazard::raw::Pointer;
-use haphazard::{Global, HazardPointer, Domain};
+use haphazard::{
+    raw::Pointer,
+    Global, 
+    HazardPointer, 
+    Domain
+};
 
-use crate::{
-    internal::utils::{skiplist_basics, GeneratesHeight, Node, HEIGHT},
-    internal::sync::iter::{ Iter, IntoIter },
-    skiplist,
+use crate::internal::utils::{
+    skiplist_basics, 
+    GeneratesHeight, 
+    Node, 
+    HEIGHT
 };
 
 pub(crate) mod tagged;
 pub mod iter;
+pub use iter::{ Iter, IntoIter };
 
 skiplist_basics!(SkipList);
 
@@ -105,11 +110,14 @@ where
             let (prev, next) = &previous_nodes[i];
             let next_ptr = next.as_ref().map_or(core::ptr::null_mut(), |n| n.as_ptr());
 
+            let curr_next = new_node.levels[i].load_ptr();
+
             if new_node.removed() {
                 break;
             }
 
-            // we check if the next node is actually lower in key than our current node.
+            // We check if the next node is actually lower in key than our current node.
+            // If the key is not greater we stop building our node.
             if next.as_ref()
                 .and_then(|n| if n.key <= new_node.key && !new_node.removed() {
                     Some(())
@@ -117,15 +125,19 @@ where
                     None
                 }).is_some()
             {
-                return Err(i);
+                break;
             }
             
             // Swap the previous' next node into the new_node's level
             // It could be the case that we link ourselves to the previous node, but just as we do
             // this `next` attempts to unlink itself and fails. So while we succeeded, `next`
             // repeats its search and finds that we are the next
-            new_node.levels[i].store_ptr(next_ptr);
+            if new_node.levels[i].compare_exchange(curr_next, next_ptr).is_err() {
+                return Err(i);
+            };
 
+            // If this is the base level, we simply increment the ref count, as we expect it to be
+            // 0. If it is not, we only increment if it > 0.
             if i == 0 {
                 new_node.add_ref();
             } else if new_node.try_add_ref().is_err() {
@@ -143,6 +155,13 @@ where
             }
 
         }
+
+        // IF we linked the node, yet it was removed during that process, there may be some levels
+        // that we linked and that were missed by the removers. We search to unlink those too.
+        if new_node.removed() {
+            self.find(&new_node.key, false);
+        }
+
         Ok(())
     }
 
@@ -286,6 +305,7 @@ where
     fn find<'a>(&'a self, key: &K, search_closest: bool) -> SearchResult<'a, K, V> {
         let head = unsafe { &(*self.head.as_ptr()) };
 
+        // Initialize the `prev` array.
         let mut prev = unsafe {
             let mut prev: [core::mem::MaybeUninit<(NodeRef<'a, K, V>, Option<NodeRef<'a, K, V>>)>; HEIGHT] 
                 = core::mem::MaybeUninit::uninit().assume_init();
@@ -466,18 +486,6 @@ where
         return Some(curr.into())
     }
 
-    fn traverse_with<F>(&self, mut f: F) where F: FnMut(&K, &V) {
-        let mut curr = self.get_first();
-
-        while let Some(c) = curr {
-            let k = c.key();
-            let v = c.val();
-            f(&k, &v);
-
-            curr = self.next_node(&c);
-        }
-    }
-
     pub fn iter<'a>(&'a self) -> Iter<'a, K, V> {
         Iter::from_list(self)
     }
@@ -606,17 +614,6 @@ impl<'a, K, V> NodeRef<'a, K, V> {
 
     fn from_raw(ptr: *mut Node<K, V>) -> Self {
         Self::from_raw_in(ptr, Domain::global())
-    }
-
-    fn from_ptr_in(ptr: &AtomicPtr<Node<K, V>>, domain: &'a Domain<Global>) -> Option<Self> {
-        let mut _hazard = HazardPointer::new_in_domain(domain);
-        let node = _hazard.protect_ptr(ptr)?.0;
-
-        Some(NodeRef { node, _hazard })
-    }
-
-    fn from_ptr(ptr: &AtomicPtr<Node<K, V>>) -> Option<Self> {
-        Self::from_ptr_in(ptr, Domain::global())
     }
 
     fn as_ptr(&self) -> *mut Node<K, V> {
@@ -935,7 +932,7 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        list.traverse_with(|k, _| println!("key: {}", k));
+        list.iter().for_each(|e| println!("key: {}", e.key));
     }
 
     #[test]
@@ -961,7 +958,7 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        list.traverse_with(|k, _| println!("key: {}", k));
+        list.iter().for_each(|e| println!("key: {}", e.key));
     }
 
     #[test]
@@ -990,7 +987,7 @@ mod sync_test {
             thread.join().unwrap()
         }
 
-        list.traverse_with(|k, _| println!("key: {}", k));
+        list.iter().for_each(|e| println!("key: {}", e.key));
     }
 
     #[test]
