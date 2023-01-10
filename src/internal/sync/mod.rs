@@ -36,20 +36,20 @@ where
     V: Send + Sync,
 {
     /// Inserts a value in the list given a key.
-    pub fn insert(&self, key: K, val: V) -> Option<(K, V)> {
+    pub fn insert<'a>(&'a self, key: K, val: V) -> Option<Entry<'a, K, V>> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         let mut insertion_point = self.find(&key, false);
         let mut existing = None;
 
         while let Some(target) = insertion_point.target.take() {
-            existing = target.try_remove_and_tag().ok().map(|temp| {
+            if target.try_remove_and_tag().is_ok() {
                 unsafe {
                     let _ = self.unlink(&target, target.height(), &insertion_point.prev);
                 }
                 insertion_point = self.find(&key, false);
-                temp
-            });
+                existing = Some(target);
+            }
         };
         
         let mut prev = insertion_point.prev;
@@ -78,18 +78,18 @@ where
                         break;
                     }
 
-                    existing = target.try_remove_and_tag().ok().map(|temp| {
+                    if target.try_remove_and_tag().is_ok() {
                         let _ = self.unlink(&target, target.height(), &search.prev);
                         search = self.find(&new_node.key, false);
-                        temp
-                    });
+                        existing = Some(target);
+                    }
                 };
 
                 (starting_height, prev) = (starting, search.prev);
             }
         }
 
-        existing
+        existing.map(|existing| existing.into())
     }
 
     /// This function is unsafe, as it does not check whether new_node or link node are valid
@@ -848,16 +848,18 @@ mod sync_test {
 
         list.insert(CountOnDrop::new(1, counter.clone()), ());
 
-        list.insert(CountOnDrop::new(1, counter.clone()), ());
-
         println!("length: {}", list.len());
+
+        list.garbage.domain.eager_reclaim();
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
 
         drop(list);
 
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
 
-        // core::mem::forget(list);
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[test]

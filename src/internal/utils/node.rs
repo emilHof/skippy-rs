@@ -217,14 +217,12 @@ impl<K, V> Node<K, V> {
         Ok(self.height() - 1)
     }
 
-    pub(crate) fn try_remove_and_tag(&self) -> Result<(K, V), ()> {
+    pub(crate) fn try_remove_and_tag(&self) -> Result<(), ()> {
         self.set_removed()?;
-
-        let kv = unsafe { (core::ptr::read(&self.key), core::ptr::read(&self.val)) };
 
         self.tag_levels(1).map_err(|_| ())?;
 
-        Ok(kv)
+        Ok(())
     }
 }
 
