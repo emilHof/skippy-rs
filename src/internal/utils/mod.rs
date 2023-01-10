@@ -149,8 +149,6 @@ macro_rules! skiplist_basics {
                 self.garbage.domain.eager_reclaim();
                 let mut node = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
 
-                println!("dropping list!");
-
                 // # Safety
                 //
                 // We have an exclusive reference to `SkipList`.
