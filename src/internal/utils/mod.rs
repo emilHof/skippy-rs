@@ -147,7 +147,7 @@ macro_rules! skiplist_basics {
                 // To ensure this is safe, clear all `HazardPointer`s in the domain.
                 // We do not want to drop a node twice!
                 self.garbage.domain.eager_reclaim();
-                let mut node = unsafe { (*self.head.as_ptr()).levels[0].as_hpz().load_ptr() };
+                let mut node = unsafe { (*self.head.as_ptr()).levels[0].load_ptr() };
 
                 // # Safety
                 //
@@ -155,7 +155,7 @@ macro_rules! skiplist_basics {
                 unsafe {
                     while !node.is_null() {
                         let temp = node;
-                        node = (*temp).levels[0].as_hpz().load_ptr();
+                        node = (*temp).levels[0].load_ptr();
                         crate::internal::utils::Node::<K, V>::drop(temp);
                     }
 

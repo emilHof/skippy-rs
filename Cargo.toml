@@ -1,6 +1,6 @@
 [package]
 name = "skippy-rs"
-version = "0.0.0-alpha.3"
+version = "0.0.0-alpha.4"
 edition = "2021"
 authors = ["Emil Hofstetter <emil.k.hofstetter@gmail.com>"]
 repository = "https://github.com/emilhof/skippy"

@@ -76,7 +76,6 @@ impl<K, V> Node<K, V> {
     pub(crate) fn new(key: K, val: V, height: usize) -> *mut Self {
         unsafe {
             let node = Self::alloc(height);
-
             ptr::write(&mut (*node).key, key);
             ptr::write(&mut (*node).val, val);
             node
@@ -128,11 +127,15 @@ impl<K, V> Node<K, V> {
         ptr::drop_in_place(&mut (*ptr).key);
         ptr::drop_in_place(&mut (*ptr).val);
 
-        Self::dealloc(ptr);
+        Node::dealloc(ptr);
     }
 
     pub(crate) fn height(&self) -> usize {
         (self.height_and_removed.load(Ordering::Relaxed) & HEIGHT_MASK) as usize
+    }
+
+    pub(crate) fn refs(&self) -> usize {
+        (self.height_and_removed.load(Ordering::SeqCst) & !REMOVED_MASK) >> (HEIGHT_BITS + 1)
     }
 
     pub(crate) fn add_ref(&self) -> usize {
@@ -152,6 +155,7 @@ impl<K, V> Node<K, V> {
 
                 Some(o + (1 << (HEIGHT_BITS + 1)))
             })
+            .map(|now| ((now & !REMOVED_MASK) >> (HEIGHT_BITS + 1)) + 1)
     }
 
     pub(crate) fn sub_ref(&self) -> usize {
@@ -165,9 +169,9 @@ impl<K, V> Node<K, V> {
                 if (o & !REMOVED_MASK) >> (HEIGHT_BITS + 1) == 0 {
                     panic!("Will underflow")
                 }
-
                 Some(o - (1 << (HEIGHT_BITS + 1)))
             })
+            .map(|now| ((now & !REMOVED_MASK) >> (HEIGHT_BITS + 1)) - 1)
     }
 
     pub(crate) fn removed(&self) -> bool {
@@ -213,14 +217,12 @@ impl<K, V> Node<K, V> {
         Ok(self.height() - 1)
     }
 
-    pub(crate) fn try_remove_and_tag(&self) -> Result<(K, V), ()> {
+    pub(crate) fn try_remove_and_tag(&self) -> Result<(), ()> {
         self.set_removed()?;
-
-        let kv = unsafe { (core::ptr::read(&self.key), core::ptr::read(&self.val)) };
 
         self.tag_levels(1).map_err(|_| ())?;
 
-        Ok(kv)
+        Ok(())
     }
 }
 
@@ -267,5 +269,28 @@ where
                 self.key, self.val, level,
             )
         })
+    }
+}
+
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_removed() {
+        unsafe {
+            let node = Node::new(1, (), 3);
+
+            assert!(!(*node).removed());
+
+            assert!((*node).set_removed().is_ok());
+
+            assert!((*node).removed());
+
+            (*node).add_ref();
+
+            assert_eq!((*node).refs(), 1);
+
+            assert_eq!((*node).try_add_ref().unwrap(), 2);
+        }
     }
 }

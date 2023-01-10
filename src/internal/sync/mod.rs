@@ -36,20 +36,20 @@ where
     V: Send + Sync,
 {
     /// Inserts a value in the list given a key.
-    pub fn insert(&self, key: K, val: V) -> Option<(K, V)> {
+    pub fn insert<'a>(&'a self, key: K, val: V) -> Option<Entry<'a, K, V>> {
         // After this check, whether we are holding the head or a regular Node will
         // not impact the operation.
         let mut insertion_point = self.find(&key, false);
         let mut existing = None;
 
         while let Some(target) = insertion_point.target.take() {
-            existing = target.try_remove_and_tag().ok().map(|temp| {
+            if target.try_remove_and_tag().is_ok() {
                 unsafe {
                     let _ = self.unlink(&target, target.height(), &insertion_point.prev);
                 }
                 insertion_point = self.find(&key, false);
-                temp
-            });
+                existing = Some(target);
+            }
         };
         
         let mut prev = insertion_point.prev;
@@ -78,18 +78,18 @@ where
                         break;
                     }
 
-                    existing = target.try_remove_and_tag().ok().map(|temp| {
+                    if target.try_remove_and_tag().is_ok() {
                         let _ = self.unlink(&target, target.height(), &search.prev);
                         search = self.find(&new_node.key, false);
-                        temp
-                    });
+                        existing = Some(target);
+                    }
                 };
 
                 (starting_height, prev) = (starting, search.prev);
             }
         }
 
-        existing
+        existing.map(|existing| existing.into())
     }
 
     /// This function is unsafe, as it does not check whether new_node or link node are valid
@@ -261,7 +261,7 @@ where
     /// Decrements the reference count of the `Node` by 1. If the reference count is thus 0, we
     /// retire the node.
     fn sub_ref<'a>(&self, node: &NodeRef<'a, K, V>) -> Option<()> {
-        if node.try_sub_ref().expect("to not underflow") == 0 {
+        if node.try_sub_ref().expect("to not overflow") == 0 {
             self.retire_node(node.as_ptr());
             None
         } else {
@@ -787,6 +787,79 @@ mod sync_test {
         unsafe {
             let _ = Box::from_raw(node);
         }
+    }
+
+    #[test]
+    fn test_drop() {
+        struct CountOnDrop<K> {
+            key: K,
+            counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl<K> CountOnDrop<K> {
+            fn new(key: K, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+                CountOnDrop { key, counter }
+            }
+
+            fn new_none(key: K) -> Self {
+                CountOnDrop { key, counter: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+            }
+        }
+        impl<K: Eq> PartialEq for CountOnDrop<K> {
+            fn eq(&self, other: &Self) -> bool {
+                self.key == other.key
+            }
+        }
+
+        impl<K: Eq> Eq for CountOnDrop<K> {}
+
+        impl<K: Ord> PartialOrd for CountOnDrop<K> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.key.cmp(&other.key))
+            }
+        }
+
+        impl<K: Ord> Ord for CountOnDrop<K> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.key.cmp(&other.key)
+            }
+        }
+
+        impl<K> Drop for CountOnDrop<K> {
+            fn drop(&mut self) {
+                println!("writing to counter!");
+                println!("count: {}", self.counter.load(Ordering::SeqCst));
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                println!("wrote to counter");
+            }
+        }
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let list = SkipList::new();
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        list.remove(&CountOnDrop::new_none(1));
+
+        // assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        list.insert(CountOnDrop::new(1, counter.clone()), ());
+
+        println!("length: {}", list.len());
+
+        list.garbage.domain.eager_reclaim();
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+
+        drop(list);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+
     }
 
     #[test]
